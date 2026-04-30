@@ -1,0 +1,14 @@
+* text=auto eol=lf
+
+# Binary artifacts — never normalize line endings
+*.rbf       binary
+*.rom       binary
+*.bin       binary
+
+# ARM binaries (no extension — handled by path rules)
+games/PICO-8/PICO-8                 binary
+games/OpenBOR_4086/OpenBOR          binary
+games/OpenBOR_7533/OpenBOR          binary
+
+# Shell scripts — keep LF on disk regardless of host OS
+*.sh        text eol=lf
