@@ -301,6 +301,12 @@ function create_sandbox()
             t[k] = v
         end
     end
+    printh("[fk-debug] create_sandbox: t.load type="..type(t.load).." _ENV.load type="..type(_ENV.load))
+    if t.load == _ENV.load then
+        printh("[fk-debug] create_sandbox: t.load IS SAME as _ENV.load")
+    else
+        printh("[fk-debug] create_sandbox: t.load DIFFERS from _ENV.load!")
+    end
     return t;
 end
 
@@ -361,6 +367,8 @@ end
 
 function __z8_run_cart(cart_code)
     local glue_code = [[--
+        printh("[fk-debug] glue_code: type(load)="..tostring(load).." type(load_cart)="..tostring(load_cart))
+        if load then printh("[fk-debug] glue_code: load is "..tostring(load)) end
         if (_init) _init()
         if _update or _update60 or _draw then
             while true do
