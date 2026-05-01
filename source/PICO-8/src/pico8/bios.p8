@@ -255,25 +255,51 @@ function _set_fps()
 end
 
 -- Load a cart from file or URL
+--
+-- MiSTer Frontier patch: # prefix in `arg` is PICO-8's BBS cart-ID syntax
+-- (used by carts hosted on the Lexaloffle BBS — e.g. multicart games that
+-- set load_mode=2 to fetch sub-carts from BBS). zepto8 on MiSTer has no
+-- network so the original __download() path hangs. Resolve `#name` against
+-- local files first; only fall through to __download if every local lookup
+-- fails. Lookup order:
+--   (1) full BBS name + .p8.png  (e.g., 'freezing_knights_map.p8.png')
+--   (2) full BBS name, auto .p8  (matches text-format carts)
+--   (3) suffix-after-last-underscore + .p8.png  (matches renamed files
+--       like 'map.p8.png' that dropped the cart-specific prefix)
+--   (4) suffix, auto .p8
+-- See project_zepto8_bbs_prefix_local_fallback.md.
 function load(arg, breadcrumb, params)
-    printh("[fk-debug] BIOS load() entered arg=" .. tostring(arg))
     local finished, success, msg
     if string.match(arg, '^#') then
-        printh("[fk-debug] BIOS load() taking DOWNLOAD path (# prefix)")
-        color(6)
-        local x,y = cursor()
-        print('downloading.. ', x, y)
-        cursor(x+14*4, y)
-        finished, success, msg = __download(arg)
-        while not finished do
-            finished, success, msg = __download()
-            flip()
+        local full_name = string.sub(arg, 2)
+        msg = ""
+        success = __load(full_name .. ".p8.png", breadcrumb, params)
+        if not success then
+            success = __load(full_name, breadcrumb, params)
+        end
+        if not success then
+            local short_name = string.match(full_name, "_([^_]+)$")
+            if short_name then
+                success = __load(short_name .. ".p8.png", breadcrumb, params)
+                if not success then
+                    success = __load(short_name, breadcrumb, params)
+                end
+            end
+        end
+        if not success then
+            color(6)
+            local x,y = cursor()
+            print('downloading.. ', x, y)
+            cursor(x+14*4, y)
+            finished, success, msg = __download(arg)
+            while not finished do
+                finished, success, msg = __download()
+                flip()
+            end
         end
     else
         color(14)
-        printh("[fk-debug] BIOS load() taking FILE path, calling __load")
         success, msg = __load(arg, breadcrumb, params), ""
-        printh("[fk-debug] BIOS load() __load returned success=" .. tostring(success))
     end
     if success then
         print('ok')
@@ -300,12 +326,6 @@ function create_sandbox()
         if __is_api(k) then
             t[k] = v
         end
-    end
-    printh("[fk-debug] create_sandbox: t.load type="..type(t.load).." _ENV.load type="..type(_ENV.load))
-    if t.load == _ENV.load then
-        printh("[fk-debug] create_sandbox: t.load IS SAME as _ENV.load")
-    else
-        printh("[fk-debug] create_sandbox: t.load DIFFERS from _ENV.load!")
     end
     return t;
 end
@@ -367,8 +387,6 @@ end
 
 function __z8_run_cart(cart_code)
     local glue_code = [[--
-        printh("[fk-debug] glue_code: type(load)="..tostring(load).." type(load_cart)="..tostring(load_cart))
-        if load then printh("[fk-debug] glue_code: load is "..tostring(load)) end
         if (_init) _init()
         if _update or _update60 or _draw then
             while true do
