@@ -1369,6 +1369,14 @@ void vm::api_ovalfill(int16_t x0, int16_t y0, int16_t x1, int16_t y1,
 
 opt<uint8_t> vm::api_private_pal(opt<uint8_t> c0, opt<uint8_t> c1, uint8_t p)
 {
+    // [fade-debug] Trace every __pal call. Reset when both args nil; otherwise
+    // shows screen palette (p=1), hardware palette (p=2), or draw palette (p=0).
+    if (c0 && c1)
+        fprintf(stderr, "[fade] __pal(c0=%d,c1=%d,p=%d)\n", (int)*c0, (int)*c1, (int)p);
+    else
+        fprintf(stderr, "[fade] __pal(reset)\n");
+    fflush(stderr);
+
     auto &ds = m_ram.draw_state;
     auto &hw = m_ram.hw_state;
 
