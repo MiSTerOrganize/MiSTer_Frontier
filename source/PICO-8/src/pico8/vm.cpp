@@ -455,6 +455,9 @@ bool vm::step(float /* seconds */)
     {
         char const *message = lua_tostring(m_lua, -1);
         lol::msg::error("error %d in main loop: %s\n", status, message);
+        fprintf(stderr, "[fk-debug] LUA ERROR in main loop status=%d msg=%s\n",
+                status, message ? message : "(null)");
+        fflush(stderr);
     }
     else
     {
@@ -533,6 +536,8 @@ void vm::axis(int player, float valueX, float valueY)
 
 void vm::api_run()
 {
+    fprintf(stderr, "[fk-debug] api_run() — cart restart\n");
+    fflush(stderr);
     save(true);
 
     // Initialise VM state (TODO: check what else to init)
@@ -552,6 +557,16 @@ void vm::api_run()
 
 void vm::api_reload(int16_t in_dst, int16_t in_src, opt<int16_t> in_size, opt<std::string> filename)
 {
+    if (in_size)
+        fprintf(stderr, "[fk-debug] reload(dst=0x%04x, src=0x%04x, size=%d, file=%s)\n",
+                (uint16_t)in_dst, (uint16_t)in_src, (int)*in_size,
+                filename ? (*filename).c_str() : "nil");
+    else
+        fprintf(stderr, "[fk-debug] reload(dst=0x%04x, src=0x%04x, size=nil, file=%s)\n",
+                (uint16_t)in_dst, (uint16_t)in_src,
+                filename ? (*filename).c_str() : "nil");
+    fflush(stderr);
+
     using std::min;
 
     int dst = 0, src = 0, size = offsetof(memory, code);
@@ -655,12 +670,16 @@ void vm::api_cstore(int16_t in_dst, int16_t in_src, opt<int16_t> in_size, opt<st
 
 fix32 vm::api_dget(int16_t n)
 {
+    fprintf(stderr, "[fk-debug] dget(%d) %s\n", (int)n, (n>=0 && n<64) ? "ok" : "OUT_OF_RANGE");
+    fflush(stderr);
     // FIXME: cannot be used before cartdata()
     return n >= 0 && n < 64 ? api_peek4(0x5e00 + 4 * n, 1)[0] : fix32(0);
 }
 
 void vm::api_dset(int16_t n, fix32 x)
 {
+    fprintf(stderr, "[fk-debug] dset(%d, ...) %s\n", (int)n, (n>=0 && n<64) ? "ok" : "OUT_OF_RANGE");
+    fflush(stderr);
     // FIXME: cannot be used before cartdata()
     if (n >= 0 && n < 64)
         api_poke4(0x5e00 + 4 * n, std::vector<fix32> { x });
