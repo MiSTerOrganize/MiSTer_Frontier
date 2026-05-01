@@ -1,0 +1,44 @@
+name: Build OpenBOR_7533 ARM binary
+
+on:
+  push:
+    paths:
+      - 'source/OpenBOR_7533/**'
+      - '.github/workflows/build_openbor_7533_arm.yml'
+  workflow_dispatch:
+
+jobs:
+  build-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build OpenBOR_7533 ARM binary in container
+        run: |
+          chmod +x source/OpenBOR_7533/.github/scripts/build_mister_arm.sh
+          # Mount source/OpenBOR_7533 as /build so the existing script works unchanged
+          # (it expects /build/src, /build/patches, /build/.github/scripts/, etc.)
+          docker run --rm --platform linux/arm/v7 \
+            -v ${{ github.workspace }}/source/OpenBOR_7533:/build \
+            -w /tmp \
+            arm32v7/debian:bullseye-slim \
+            bash /build/.github/scripts/build_mister_arm.sh
+
+      - name: Verify binary
+        run: |
+          ls -lh source/OpenBOR_7533/OpenBOR
+          file source/OpenBOR_7533/OpenBOR || true
+
+      - name: Upload OpenBOR_7533 binary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenBOR_7533-arm-binary
+          path: source/OpenBOR_7533/OpenBOR
+          if-no-files-found: error
