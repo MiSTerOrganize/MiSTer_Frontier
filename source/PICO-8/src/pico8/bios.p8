@@ -256,8 +256,10 @@ end
 
 -- Load a cart from file or URL
 function load(arg, breadcrumb, params)
+    printh("[fk-debug] BIOS load() entered arg=" .. tostring(arg))
     local finished, success, msg
     if string.match(arg, '^#') then
+        printh("[fk-debug] BIOS load() taking DOWNLOAD path (# prefix)")
         color(6)
         local x,y = cursor()
         print('downloading.. ', x, y)
@@ -269,7 +271,9 @@ function load(arg, breadcrumb, params)
         end
     else
         color(14)
+        printh("[fk-debug] BIOS load() taking FILE path, calling __load")
         success, msg = __load(arg, breadcrumb, params), ""
+        printh("[fk-debug] BIOS load() __load returned success=" .. tostring(success))
     end
     if success then
         print('ok')

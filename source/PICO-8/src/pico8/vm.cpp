@@ -1275,6 +1275,9 @@ void vm::api_printh(rich_string str, opt<std::string> filename, opt<bool> overwr
     {
         fprintf(stdout, "%s\n", decoded.c_str());
         fflush(stdout);
+        // [fk-debug] mirror to stderr so BIOS-side debug prints reach pico8.log
+        fprintf(stderr, "%s\n", decoded.c_str());
+        fflush(stderr);
     }
 }
 
