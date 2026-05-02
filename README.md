@@ -43,6 +43,26 @@ existing setup.
 When new Frontier cores are released, just run `update_all` again. New
 cores show up and work the same way, no reinstall needed.
 
+## Note for existing PICO-8 users (May 2026)
+
+The PICO-8 BIOS file was renamed from `boot.rom` to `bios.p8`. This
+makes `update_all` automatically deliver future BIOS updates — the old
+filename was hardcoded by MiSTer's downloader to never overwrite, so
+fixes were not reaching users who already had it installed.
+
+After your next `update_all`:
+
+- The new `bios.p8` is deployed alongside the updated emulator binary.
+- Your old `/media/fat/games/PICO-8/boot.rom` is left behind, unused.
+  It is harmless but you can delete it for cleanliness:
+
+  ```bash
+  rm /media/fat/games/PICO-8/boot.rom
+  ```
+
+Going forward, all BIOS updates auto-deploy through `update_all` with no
+manual steps needed.
+
 ## How it works
 
 When you load a Frontier core from MiSTer's menu, the FPGA loads the
