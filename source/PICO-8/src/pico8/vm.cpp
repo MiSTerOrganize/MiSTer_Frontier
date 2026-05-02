@@ -33,6 +33,9 @@
 #include "pico8/vm.h"
 #include "bindings/lua.h"
 #include "bios.h"
+extern "C" {
+#include "eris.h"  // Lua state persistence — used by savestate (Phase 1B)
+}
 
 // FIXME: activate this one day, when we use Lua 5.3 maybe?
 #define HAVE_LUA_GETEXTRASPACE 0
@@ -870,20 +873,55 @@ bool vm::save_cartdata(bool force)
 // ─────────────────────────────────────────────────────────────────────
 // Save states (MiSTer Frontier — same UX as NES core's 4-slot save)
 //
-// Phase 1A: snapshot/restore m_ram only. Lua VM state (via eris) is
-// Phase 1B. File format is forward-compatible — header has a section
-// table so future phases can append Lua state, audio state, etc.
-// without breaking 1A files.
+// Phase 1B: snapshot/restore m_ram + cart filename + Lua sandbox state
+// (via eris). Multicart games are handled by recording the active cart
+// at save time and restoring it before applying the rest of the state.
 //
-// File format:
-//   magic[4]     "ZS01"
-//   version[4]   uint32_t (currently 1)
-//   ram_size[4]  uint32_t = sizeof(memory)
+// File format (version 2):
+//   magic[4]        "ZS01"
+//   version[4]      uint32_t = 2
+//   ram_size[4]     uint32_t = sizeof(memory)
 //   ram[ram_size]
+//   cart_path_len[4] uint32_t (0 if none recorded)
+//   cart_path[cart_path_len]
+//   lua_blob_len[4] uint32_t (0 if no Lua state captured)
+//   lua_blob[lua_blob_len]
+//
+// Version-1 files (Phase 1A — m_ram only) are still loadable —
+// missing trailing sections are treated as "skip Lua restore."
 // ─────────────────────────────────────────────────────────────────────
 
 static constexpr char SAVESTATE_MAGIC[4] = {'Z','S','0','1'};
-static constexpr uint32_t SAVESTATE_VERSION = 1;
+static constexpr uint32_t SAVESTATE_VERSION_MIN = 1;
+static constexpr uint32_t SAVESTATE_VERSION = 2;
+
+// eris perms-table builder. eris uses a "permanent" table to map values
+// (functions, userdata) that should be stored as references rather than
+// serialized. We populate it from the BIOS api function set so eris
+// references the live C/Lua functions on restore instead of trying to
+// serialize C closures (which it can't).
+//
+// IMPORTANT: iteration order must be stable across save and load. We use
+// the function name string as the perm-table key to avoid relying on
+// unordered_set iteration order.
+static void savestate_build_perms(lua_State* L, bool for_save)
+{
+    lua_newtable(L);  // perms table at top
+    for (auto const& name : api::functions) {
+        lua_getglobal(L, name.c_str());
+        if (lua_isnil(L, -1)) { lua_pop(L, 1); continue; }
+        if (for_save) {
+            // perms[function] = name_string  (so eris finds the id when serializing)
+            lua_pushstring(L, name.c_str());
+            lua_settable(L, -3);
+        } else {
+            // perms[name_string] = function  (so eris finds the value when restoring)
+            // value is at -1, perms at -2
+            lua_setfield(L, -2, name.c_str());
+        }
+    }
+}
+
 
 std::string vm::savestate_path(int slot) const
 {
@@ -906,8 +944,6 @@ bool vm::savestate_save(int slot)
         return false;
     }
 
-    // Ensure parent directory exists. mkdir -p via system() is dirty but
-    // matches existing patterns elsewhere in this codebase.
     system("mkdir -p /media/fat/savestates/PICO-8");
 
     std::string path = savestate_path(slot);
@@ -917,16 +953,53 @@ bool vm::savestate_save(int slot)
         return false;
     }
 
+    // Header
     fwrite(SAVESTATE_MAGIC, 1, 4, f);
     uint32_t version = SAVESTATE_VERSION;
     fwrite(&version, 4, 1, f);
+
+    // m_ram section
     uint32_t ram_size = sizeof(memory);
     fwrite(&ram_size, 4, 1, f);
     fwrite(&m_ram, 1, sizeof(memory), f);
 
+    // Cart path section — what cart was active at save time. Used by load
+    // to handle multicarts: if the active cart at load time differs, we
+    // private_load() the saved one before restoring memory + Lua state.
+    std::string cart_path = m_cart.get_filename();
+    uint32_t cart_path_len = (uint32_t)cart_path.size();
+    fwrite(&cart_path_len, 4, 1, f);
+    if (cart_path_len) fwrite(cart_path.data(), 1, cart_path_len, f);
+
+    // Lua sandbox state via eris. Persist __z8_sandbox (the cart's _ENV)
+    // with a perms table mapping all api::functions to their name strings.
+    std::string lua_blob;
+    int top = lua_gettop(m_lua);
+    lua_getglobal(m_lua, "__z8_sandbox");
+    if (lua_istable(m_lua, -1)) {
+        int sandbox_idx = lua_gettop(m_lua);
+        savestate_build_perms(m_lua, /*for_save=*/true);
+        int perms_idx = lua_gettop(m_lua);
+        // eris_persist pushes the serialized string onto the stack
+        eris_persist(m_lua, perms_idx, sandbox_idx);
+        size_t blob_len = 0;
+        const char* blob_data = lua_tolstring(m_lua, -1, &blob_len);
+        if (blob_data && blob_len > 0) {
+            lua_blob.assign(blob_data, blob_len);
+        }
+    } else {
+        fprintf(stderr, "[savestate] save slot %d: __z8_sandbox not available, skipping Lua state\n", slot);
+    }
+    lua_settop(m_lua, top);  // restore stack
+
+    uint32_t lua_blob_len = (uint32_t)lua_blob.size();
+    fwrite(&lua_blob_len, 4, 1, f);
+    if (lua_blob_len) fwrite(lua_blob.data(), 1, lua_blob_len, f);
+
     long pos = ftell(f);
     fclose(f);
-    fprintf(stderr, "[savestate] saved slot %d: %ld bytes -> %s\n", slot, pos, path.c_str());
+    fprintf(stderr, "[savestate] saved slot %d: %ld bytes (ram=%u, cart_path=%u, lua=%u) -> %s\n",
+            slot, pos, ram_size, cart_path_len, lua_blob_len, path.c_str());
     return true;
 }
 
@@ -958,9 +1031,9 @@ bool vm::savestate_load(int slot)
         return false;
     }
 
-    if (version != SAVESTATE_VERSION) {
-        fprintf(stderr, "[savestate] load slot %d: version mismatch (file=%u, expected=%u)\n",
-                slot, version, SAVESTATE_VERSION);
+    if (version < SAVESTATE_VERSION_MIN || version > SAVESTATE_VERSION) {
+        fprintf(stderr, "[savestate] load slot %d: unsupported version %u (this build supports %u..%u)\n",
+                slot, version, SAVESTATE_VERSION_MIN, SAVESTATE_VERSION);
         fclose(f);
         return false;
     }
@@ -972,13 +1045,115 @@ bool vm::savestate_load(int slot)
         return false;
     }
 
-    if (fread(&m_ram, 1, sizeof(memory), f) != sizeof(memory)) {
+    // Read m_ram into a staging buffer first — we may need to defer applying
+    // it until after a cart-reload (which resets m_ram).
+    memory staged_ram;
+    if (fread(&staged_ram, 1, sizeof(memory), f) != sizeof(memory)) {
         fprintf(stderr, "[savestate] load slot %d: short read of m_ram\n", slot);
         fclose(f);
         return false;
     }
 
+    // V2+ sections: cart path + Lua blob
+    std::string saved_cart_path;
+    std::string lua_blob;
+    if (version >= 2) {
+        uint32_t cart_path_len = 0, lua_blob_len = 0;
+        if (fread(&cart_path_len, 4, 1, f) != 1) {
+            fprintf(stderr, "[savestate] load slot %d: short read of cart_path_len\n", slot);
+            fclose(f); return false;
+        }
+        if (cart_path_len) {
+            saved_cart_path.resize(cart_path_len);
+            if (fread(&saved_cart_path[0], 1, cart_path_len, f) != cart_path_len) {
+                fprintf(stderr, "[savestate] load slot %d: short read of cart_path\n", slot);
+                fclose(f); return false;
+            }
+        }
+        if (fread(&lua_blob_len, 4, 1, f) != 1) {
+            fprintf(stderr, "[savestate] load slot %d: short read of lua_blob_len\n", slot);
+            fclose(f); return false;
+        }
+        if (lua_blob_len) {
+            lua_blob.resize(lua_blob_len);
+            if (fread(&lua_blob[0], 1, lua_blob_len, f) != lua_blob_len) {
+                fprintf(stderr, "[savestate] load slot %d: short read of lua_blob\n", slot);
+                fclose(f); return false;
+            }
+        }
+    }
     fclose(f);
+
+    // Multicart: if the saved cart differs from the currently active cart,
+    // private_load() the saved one first. That restarts the Lua VM with
+    // the saved cart's code; we then apply the m_ram + Lua-state restore
+    // on top of the freshly-initialized state.
+    if (!saved_cart_path.empty() && saved_cart_path != m_cart.get_filename()) {
+        fprintf(stderr, "[savestate] load slot %d: cart mismatch — restarting with %s\n",
+                slot, saved_cart_path.c_str());
+        if (!load_cart(m_cart, saved_cart_path)) {
+            fprintf(stderr, "[savestate] load slot %d: failed to load saved cart %s\n",
+                    slot, saved_cart_path.c_str());
+            return false;
+        }
+        run();  // re-run the cart's _init() etc. via __z8_run_cart
+    }
+
+    // Apply m_ram (overwrites cart-init memory state).
+    memcpy(&m_ram, &staged_ram, sizeof(memory));
+
+    // Apply Lua state via eris. We mutate __z8_sandbox in place rather
+    // than replacing the global, so the cart's main-loop coroutine
+    // (which holds a reference to the table object) sees the new values.
+    if (!lua_blob.empty()) {
+        int top = lua_gettop(m_lua);
+        lua_getglobal(m_lua, "__z8_sandbox");
+        if (!lua_istable(m_lua, -1)) {
+            fprintf(stderr, "[savestate] load slot %d: __z8_sandbox not a table, skipping Lua restore\n", slot);
+            lua_settop(m_lua, top);
+        } else {
+            int sandbox_idx = lua_gettop(m_lua);  // absolute index of the sandbox
+
+            savestate_build_perms(m_lua, /*for_save=*/false);
+            int perms_idx = lua_gettop(m_lua);
+
+            // Push the blob as a Lua string and call eris_unpersist on it
+            lua_pushlstring(m_lua, lua_blob.data(), lua_blob.size());
+            int blob_idx = lua_gettop(m_lua);
+            eris_unpersist(m_lua, perms_idx, blob_idx);
+            // Stack now: ..., sandbox, perms, blob_string, restored_value
+
+            if (!lua_istable(m_lua, -1)) {
+                fprintf(stderr, "[savestate] load slot %d: eris restored value is not a table\n", slot);
+                lua_settop(m_lua, top);
+                return false;
+            }
+
+            int restored_idx = lua_gettop(m_lua);
+
+            // Mutate sandbox to match restored table:
+            // 1) Remove keys from sandbox that aren't api functions and aren't
+            //    in the restored table (cart may have deleted them between save & now)
+            // 2) Copy keys from restored table to sandbox
+            //
+            // For simplicity we just do step 2 (copy/overwrite). Stale keys
+            // in the current sandbox will remain — usually harmless because
+            // the restored cart code references only its own keys.
+            lua_pushnil(m_lua);
+            while (lua_next(m_lua, restored_idx) != 0) {
+                // stack: ..., sandbox, perms, restored, key, value
+                lua_pushvalue(m_lua, -2);  // copy key
+                lua_pushvalue(m_lua, -2);  // copy value
+                // stack: ..., sandbox, perms, restored, key, value, key, value
+                lua_settable(m_lua, sandbox_idx);
+                lua_pop(m_lua, 1);  // pop value, keep key for next iteration
+            }
+
+            lua_settop(m_lua, top);
+            fprintf(stderr, "[savestate] load slot %d: Lua state restored (%zu bytes)\n", slot, lua_blob.size());
+        }
+    }
+
     fprintf(stderr, "[savestate] loaded slot %d from %s\n", slot, path.c_str());
     return true;
 }

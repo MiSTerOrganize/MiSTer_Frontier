@@ -327,6 +327,11 @@ function create_sandbox()
             t[k] = v
         end
     end
+    -- MiSTer Frontier: expose the active sandbox so C++ savestate code
+    -- can persist/restore the cart's globals via eris. This is the
+    -- table the cart's chunk uses as its _ENV — mutating its keys in
+    -- place updates the running cart's state.
+    __z8_sandbox = t
     return t;
 end
 
