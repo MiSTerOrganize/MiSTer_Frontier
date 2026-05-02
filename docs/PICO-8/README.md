@@ -19,17 +19,7 @@ A PICO-8 fantasy console emulator for MiSTer FPGA with native video and audio ou
 3. Place your `.p8` or `.p8.png` carts in `games/PICO-8/Carts/`
 4. Load **PICO-8** from the console menu to play
 
-The install script downloads and installs everything: the FPGA core, ARM binary, BIOS, and daemon.
-
-### Upgrading from a previous install (May 2026)
-
-The BIOS file was renamed from `boot.rom` to `bios.p8`. After your next `update_all`, the new BIOS deploys automatically alongside the updated emulator binary, but your old `boot.rom` is left behind, unused. It is harmless but you can delete it for cleanliness:
-
-```bash
-rm /media/fat/games/PICO-8/boot.rom
-```
-
-This rename was needed because MiSTer's downloader hardcodes `boot.rom` as a never-overwrite file, blocking BIOS bug fixes from reaching existing installs. With the new filename, future BIOS updates flow through `update_all` automatically.
+The install script downloads and installs everything: the FPGA core, ARM binary, BIOS (`bios.p8` in `games/PICO-8/`), and daemon.
 
 ## Manual Install
 
