@@ -33,9 +33,7 @@
 #include "pico8/vm.h"
 #include "bindings/lua.h"
 #include "bios.h"
-extern "C" {
 #include "eris.h"  // Lua state persistence — used by savestate (Phase 1B)
-}
 
 // FIXME: activate this one day, when we use Lua 5.3 maybe?
 #define HAVE_LUA_GETEXTRASPACE 0
