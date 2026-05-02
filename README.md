@@ -72,3 +72,11 @@ auditing, and contribution.
 ## License
 
 GPL-3.0 — see [`LICENSE`](LICENSE).
+
+## Support
+
+<p align="center">
+  <a href="https://www.patreon.com/join/MiSTer_Organize">
+    <img src="https://github.com/MiSTerOrganize/MiSTer_Frontier/raw/main/assets/patreon_banner.png" alt="Support MiSTer Organize on Patreon" width="500">
+  </a>
+</p>
