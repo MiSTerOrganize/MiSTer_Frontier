@@ -926,7 +926,6 @@ bool vm::savestate_save(int slot)
 
     long pos = ftell(f);
     fclose(f);
-    sync();  // flush to SD card so a power cycle doesn't lose the save
     fprintf(stderr, "[savestate] saved slot %d: %ld bytes -> %s\n", slot, pos, path.c_str());
     return true;
 }
