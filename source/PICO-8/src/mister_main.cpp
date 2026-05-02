@@ -613,9 +613,31 @@ int main(int argc, char **argv)
         while (g_running && game_running)
     {
         // ── Save-state request handling ──────────────────────────────
-        // Signal handlers (Phase 1A) or DDR3 control word (Phase 2) set
-        // request flags; we dispatch them here, between frames, so the
-        // VM and audio thread are at a clean state boundary.
+        // Sources: (1) FPGA savestate_ui via DDR3 control word from the
+        // OSD pause-menu and F1-F4 keyboard shortcuts (Phase 3), and
+        // (2) SIGUSR1/SIGUSR2 fallback for SSH-driven testing (Phase 1A).
+        // Both feed the same request flags; dispatched here between frames
+        // so the VM and audio thread are at a clean state boundary.
+        {
+            static uint8_t ss_last_seq    = 0;
+            static bool    ss_seq_seeded  = false;
+            uint32_t ss_word = NativeVideoWriter_ReadSavestate();
+            uint8_t  cmd  = NV_SsCmd (ss_word);
+            uint8_t  slot = NV_SsSlot(ss_word) & 0x3;
+            uint8_t  seq  = NV_SsSeq (ss_word);
+            if (!ss_seq_seeded) {
+                // Capture FPGA's current seq as the baseline so a stale
+                // counter from a previous run doesn't trigger spurious
+                // save/load on first frame.
+                ss_last_seq   = seq;
+                ss_seq_seeded = true;
+            }
+            else if (seq != ss_last_seq) {
+                ss_last_seq = seq;
+                if      (cmd == 1) g_savestate_save_request = slot;
+                else if (cmd == 2) g_savestate_load_request = slot;
+            }
+        }
         if (g_savestate_save_request >= 0) {
             int slot = g_savestate_save_request;
             g_savestate_save_request = -1;
@@ -657,7 +679,7 @@ int main(int argc, char **argv)
         // (= btn(b, 0)) and only see P1; multi-player carts read btn(b, p)
         // for each p. Don't OR across controllers here — that breaks
         // single-player carts (P2 would pause / move P1's character).
-        // The boot.rom pause-menu uses __z8_anybtnp() helpers so that once
+        // The bios.p8 pause-menu uses __z8_anybtnp() helpers so that once
         // P1 opens the menu, any player can navigate it.
         //
         // CONF_STR: "J1,O,X,Pause;" / "jn,B,Y,Start;" (SNES: B=Xbox A, Y=Xbox X)
