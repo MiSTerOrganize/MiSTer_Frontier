@@ -81,6 +81,17 @@ static void signal_handler(int sig)
     // When the process dies, the FPGA ring buffer drains to silence.
 }
 
+// Save-state request flags. Signal handlers set these; the main loop
+// polls them between frames and dispatches the actual save/load.
+// Phase 1A uses SIGUSR1=save slot 0 and SIGUSR2=load slot 0 for SSH-driven
+// testing. Phase 2 replaces this with a DDR3 control word the FPGA writes
+// when the OSD save-state UI fires.
+static volatile int g_savestate_save_request = -1;  // slot 0..3, or -1
+static volatile int g_savestate_load_request = -1;
+
+static void savestate_save_signal(int sig) { (void)sig; g_savestate_save_request = 0; }
+static void savestate_load_signal(int sig) { (void)sig; g_savestate_load_request = 0; }
+
 // ── Audio thread — DDR3 ring buffer writer ───────────────────────────
 // Renders 22050Hz mono from zepto8, upsamples to 48KHz stereo,
 // writes to DDR3 ring buffer. FPGA reads at 48KHz.
@@ -372,6 +383,10 @@ int main(int argc, char **argv)
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+    // Phase 1A save-state testing: SSH `kill -USR1 <pid>` saves to slot 0,
+    // `kill -USR2 <pid>` loads slot 0. To be replaced by DDR3 trigger in Phase 2.
+    signal(SIGUSR1, savestate_save_signal);
+    signal(SIGUSR2, savestate_load_signal);
 
     // ── Init SDL ──────────────────────────────────────────────────────
     // In native video mode, use SDL's dummy video driver — this gives us
@@ -597,6 +612,21 @@ int main(int argc, char **argv)
         bool hot_swap_pending = false;
         while (g_running && game_running)
     {
+        // ── Save-state request handling ──────────────────────────────
+        // Signal handlers (Phase 1A) or DDR3 control word (Phase 2) set
+        // request flags; we dispatch them here, between frames, so the
+        // VM and audio thread are at a clean state boundary.
+        if (g_savestate_save_request >= 0) {
+            int slot = g_savestate_save_request;
+            g_savestate_save_request = -1;
+            if (g_vm) g_vm->savestate_save(slot);
+        }
+        if (g_savestate_load_request >= 0) {
+            int slot = g_savestate_load_request;
+            g_savestate_load_request = -1;
+            if (g_vm) g_vm->savestate_load(slot);
+        }
+
         uint64_t now = get_time_ns();
 
         // Frame timing: sleep for most of the wait, then busy-wait for precision.

@@ -867,6 +867,123 @@ bool vm::save_cartdata(bool force)
     return saved;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Save states (MiSTer Frontier — same UX as NES core's 4-slot save)
+//
+// Phase 1A: snapshot/restore m_ram only. Lua VM state (via eris) is
+// Phase 1B. File format is forward-compatible — header has a section
+// table so future phases can append Lua state, audio state, etc.
+// without breaking 1A files.
+//
+// File format:
+//   magic[4]     "ZS01"
+//   version[4]   uint32_t (currently 1)
+//   ram_size[4]  uint32_t = sizeof(memory)
+//   ram[ram_size]
+// ─────────────────────────────────────────────────────────────────────
+
+static constexpr char SAVESTATE_MAGIC[4] = {'Z','S','0','1'};
+static constexpr uint32_t SAVESTATE_VERSION = 1;
+
+std::string vm::savestate_path(int slot) const
+{
+    // Per-cart filename, like NES: /media/fat/savestates/PICO-8/<basename>_<slot>.ss
+    std::string cart_path = m_entry_cart.empty() ? m_cart.get_filename() : m_entry_cart;
+    auto last_slash = cart_path.find_last_of('/');
+    std::string basename = (last_slash == std::string::npos) ? cart_path : cart_path.substr(last_slash + 1);
+    // Strip .p8.png or .p8 extension
+    if (basename.size() > 7 && basename.compare(basename.size() - 7, 7, ".p8.png") == 0)
+        basename.resize(basename.size() - 7);
+    else if (basename.size() > 3 && basename.compare(basename.size() - 3, 3, ".p8") == 0)
+        basename.resize(basename.size() - 3);
+    return "/media/fat/savestates/PICO-8/" + basename + "_" + std::to_string(slot) + ".ss";
+}
+
+bool vm::savestate_save(int slot)
+{
+    if (slot < 0 || slot > 3) {
+        fprintf(stderr, "[savestate] save: invalid slot %d (must be 0-3)\n", slot);
+        return false;
+    }
+
+    // Ensure parent directory exists. mkdir -p via system() is dirty but
+    // matches existing patterns elsewhere in this codebase.
+    system("mkdir -p /media/fat/savestates/PICO-8");
+
+    std::string path = savestate_path(slot);
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) {
+        fprintf(stderr, "[savestate] save slot %d: cannot open %s for write\n", slot, path.c_str());
+        return false;
+    }
+
+    fwrite(SAVESTATE_MAGIC, 1, 4, f);
+    uint32_t version = SAVESTATE_VERSION;
+    fwrite(&version, 4, 1, f);
+    uint32_t ram_size = sizeof(memory);
+    fwrite(&ram_size, 4, 1, f);
+    fwrite(&m_ram, 1, sizeof(memory), f);
+
+    long pos = ftell(f);
+    fclose(f);
+    sync();  // flush to SD card so a power cycle doesn't lose the save
+    fprintf(stderr, "[savestate] saved slot %d: %ld bytes -> %s\n", slot, pos, path.c_str());
+    return true;
+}
+
+bool vm::savestate_load(int slot)
+{
+    if (slot < 0 || slot > 3) {
+        fprintf(stderr, "[savestate] load: invalid slot %d (must be 0-3)\n", slot);
+        return false;
+    }
+
+    std::string path = savestate_path(slot);
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) {
+        fprintf(stderr, "[savestate] load slot %d: cannot open %s (no save in this slot?)\n", slot, path.c_str());
+        return false;
+    }
+
+    char magic[4];
+    if (fread(magic, 1, 4, f) != 4 || memcmp(magic, SAVESTATE_MAGIC, 4) != 0) {
+        fprintf(stderr, "[savestate] load slot %d: bad magic in %s\n", slot, path.c_str());
+        fclose(f);
+        return false;
+    }
+
+    uint32_t version, ram_size;
+    if (fread(&version, 4, 1, f) != 1 || fread(&ram_size, 4, 1, f) != 1) {
+        fprintf(stderr, "[savestate] load slot %d: short read of header\n", slot);
+        fclose(f);
+        return false;
+    }
+
+    if (version != SAVESTATE_VERSION) {
+        fprintf(stderr, "[savestate] load slot %d: version mismatch (file=%u, expected=%u)\n",
+                slot, version, SAVESTATE_VERSION);
+        fclose(f);
+        return false;
+    }
+
+    if (ram_size != sizeof(memory)) {
+        fprintf(stderr, "[savestate] load slot %d: ram_size mismatch (file=%u, expected=%zu)\n",
+                slot, ram_size, sizeof(memory));
+        fclose(f);
+        return false;
+    }
+
+    if (fread(&m_ram, 1, sizeof(memory), f) != sizeof(memory)) {
+        fprintf(stderr, "[savestate] load slot %d: short read of m_ram\n", slot);
+        fclose(f);
+        return false;
+    }
+
+    fclose(f);
+    fprintf(stderr, "[savestate] loaded slot %d from %s\n", slot, path.c_str());
+    return true;
+}
+
 bool config_parse_256(std::string line, std::string name, float& value)
 {
     if (line.rfind(name, 0) != 0) return false;
