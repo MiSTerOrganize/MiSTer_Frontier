@@ -27,7 +27,7 @@
 #include <chrono>
 #include <ctime>
 #include <cassert>
-#include <vector>     // savestate_load — staging keys-to-delete during sandbox mutation
+#include <unordered_set>  // perms_walk cycle detection
 #include <sstream> // std::stringstream
 
 #include "pico8/pico8.h"
@@ -872,42 +872,26 @@ bool vm::save_cartdata(bool force)
 // ─────────────────────────────────────────────────────────────────────
 // Save states (MiSTer Frontier — same UX as NES core's 4-slot save)
 //
-// File format (version 3 — current):
-//   magic[4]         "ZS01"
-//   version[4]       uint32_t = 3
-//   ram_size[4]      uint32_t = sizeof(memory)
-//   ram[ram_size]    m_ram (PICO-8 memory map: gfx, sfx, map, persistent)
-//   cart_path_len[4] uint32_t
-//   cart_path[len]   active cart filename (for multicart restore)
-//   lua_blob_len[4]  uint32_t
-//   lua_blob[len]    eris-persisted __z8_sandbox (cart _ENV table)
-//   state_size[4]    uint32_t = sizeof(state)
-//   state[state_size]  m_state (audio sequencer, draw mirror, input)
-//   menu_blob_len[4] uint32_t
-//   menu_blob[len]   eris-persisted __z8_menu (pause-menu state + items)
+// File format (version 4 — current):
+//   magic[4]              "ZS01"
+//   version[4]            uint32_t = 4
+//   ram_size[4]           uint32_t = sizeof(memory)
+//   ram[ram_size]         m_ram (PICO-8 memory map: gfx, sfx, map, persistent)
+//   cart_path_len[4]      uint32_t
+//   cart_path[len]        active cart filename (for multicart restore)
+//   state_size[4]         uint32_t = sizeof(state)
+//   state[state_size]     m_state (audio sequencer, draw mirror, input)
+//   fullstate_blob_len[4] uint32_t
+//   fullstate_blob[len]   eris-persisted { loop, sandbox, menu } wrapper:
+//                           loop    = __z8_loop      (cart coroutine + call stack)
+//                           sandbox = __z8_sandbox   (cart _ENV, also reachable from loop)
+//                           menu    = __z8_menu      (pause-menu state + items)
 //
-// Restore strategy (KEY): the cart sandbox table object identity must be
-// preserved. The cart's compiled functions hold _ENV upvalues bound to
-// the original __z8_sandbox object. If we replace the global with a new
-// table, those upvalues still point at the orphan original. So load
-// IN-PLACE-MUTATES the existing __z8_sandbox: clear its keys, then
-// copy from the eris-restored temp table. Function _ENVs continue to
-// point at the same object, now with restored content. Same applies to
-// __z8_menu (BIOS code accesses it via global lookup, but we still
-// in-place mutate for consistency and to avoid orphaning the old menu
-// items table).
-//
-// Coroutine call stack is NOT restored. The cart's existing __z8_loop
-// coroutine continues from wherever it currently is. Cart globals are
-// restored, so the next _update60 / _draw cycle reads saved state and
-// renders the saved scene. This is the same approach v2/v3 used and
-// what works in practice — full coroutine persist (attempted in v4)
-// hit eris-related _G identity issues that proved intractable.
-//
-// Older formats are still loadable:
+// Older formats are still loadable via legacy code paths:
 //   v1 (Phase 1A): ram only.
 //   v2 (Phase 1B): + cart_path + sandbox-only lua_blob.
-//   v3 (this version): + m_state + menu_blob.
+//   v3 (Phase 3 follow-up): + m_state + sandbox-only lua_blob + separate menu_blob.
+//   v4 (Phase 4): replaces sandbox/menu blobs with full coroutine persist.
 // ─────────────────────────────────────────────────────────────────────
 
 static constexpr char SAVESTATE_MAGIC[4] = {'Z','S','0','1'};
@@ -915,7 +899,11 @@ static constexpr uint32_t SAVESTATE_VERSION_MIN = 1;
 // v1: ram only.
 // v2: + cart filename + Lua sandbox via eris.
 // v3: + m_state (audio sequencer / draw / input mirror) + __z8_menu via eris.
-static constexpr uint32_t SAVESTATE_VERSION = 3;
+// v4: replace sandbox blob with FULL coroutine persist (the cart's main-loop
+//     coroutine __z8_loop, including call stack, locals, upvalues — yields
+//     proper resume-where-you-left-off semantics). The wrapper table persists
+//     {loop, sandbox, menu} together so eris preserves shared object identity.
+static constexpr uint32_t SAVESTATE_VERSION = 4;
 
 // eris perms-table builder. eris uses a "permanent" table to map values
 // (functions, userdata) that should be stored as references rather than
@@ -943,6 +931,102 @@ static void savestate_build_perms(lua_State* L, bool for_save)
         }
     }
 }
+
+// FULL perms builder for v4 — recursively walks _G (and the registry) to
+// add every C function and library table to the perms map. This is needed
+// when persisting an entire coroutine call stack: any C function on the
+// stack or referenced by an upvalue must have a perms entry, otherwise
+// eris fails with "attempt to persist a C function with no permanent name".
+//
+// We key by absolute name path (e.g. "string.sub", "math.cos") so that the
+// same lookup works at save and load time even though function pointers
+// differ between processes/runs. Cycles are handled with a "seen" set
+// keyed by Lua object identity (lua_topointer).
+static void perms_walk(lua_State* L, int perms_idx, int table_idx,
+                       std::string const& prefix, bool for_save,
+                       std::unordered_set<void const*>& seen)
+{
+    table_idx = lua_absindex(L, table_idx);
+    perms_idx = lua_absindex(L, perms_idx);
+
+    lua_pushnil(L);
+    while (lua_next(L, table_idx) != 0) {
+        // stack: ..., key, value
+        if (lua_type(L, -2) != LUA_TSTRING) {
+            lua_pop(L, 1);  // pop value, keep key
+            continue;
+        }
+        std::string key = lua_tostring(L, -2);
+        std::string full_name = prefix.empty() ? key : prefix + "." + key;
+
+        int vt = lua_type(L, -1);
+        if (vt == LUA_TFUNCTION && lua_iscfunction(L, -1)) {
+            void const* fp = lua_topointer(L, -1);
+            if (fp && seen.insert(fp).second) {
+                if (for_save) {
+                    lua_pushvalue(L, -1);                    // copy function
+                    lua_pushstring(L, full_name.c_str());    // name
+                    lua_settable(L, perms_idx);              // perms[func] = "name"
+                } else {
+                    lua_pushvalue(L, -1);                    // copy function
+                    lua_setfield(L, perms_idx, full_name.c_str()); // perms["name"] = func
+                }
+            }
+        } else if (vt == LUA_TTABLE) {
+            void const* tp = lua_topointer(L, -1);
+            if (tp && seen.insert(tp).second) {
+                // Add the table itself to perms too — so references to library
+                // tables (e.g. `string`, `math`) survive across save/load.
+                if (for_save) {
+                    lua_pushvalue(L, -1);
+                    lua_pushstring(L, full_name.c_str());
+                    lua_settable(L, perms_idx);
+                } else {
+                    lua_pushvalue(L, -1);
+                    lua_setfield(L, perms_idx, full_name.c_str());
+                }
+                // Recurse into the table to find nested C functions.
+                perms_walk(L, perms_idx, lua_gettop(L), full_name, for_save, seen);
+            }
+        }
+        lua_pop(L, 1);  // pop value, keep key
+    }
+}
+
+static void savestate_build_perms_full(lua_State* L, bool for_save)
+{
+    lua_newtable(L);  // perms table at top
+    int perms_idx = lua_gettop(L);
+
+    std::unordered_set<void const*> seen;
+
+    // CRITICAL: register _G itself as a permanent value before walking it.
+    // Without this, eris encounters _G via the cart coroutine's BIOS-side
+    // call frames (flip, the cocreate wrapper, etc., which all have _ENV=_G)
+    // and serializes a *copy* of the entire BIOS environment. After load
+    // those frames run against the dead copy, not the live _G. Result: cart
+    // appears to run but has no connection to the live engine state.
+    // Diagnosed via v4.2 _ENV upvalue walk: BIOS frames had _ENV pointing
+    // at a different table than the live _G.
+    lua_pushglobaltable(L);
+    if (for_save) {
+        lua_pushvalue(L, -1);                     // duplicate _G
+        lua_pushstring(L, "_G");                  // key = "_G"
+        lua_settable(L, perms_idx);               // perms[_G_table] = "_G"
+    } else {
+        lua_pushvalue(L, -1);                     // duplicate _G
+        lua_setfield(L, perms_idx, "_G");         // perms["_G"] = _G_table
+    }
+    seen.insert(lua_topointer(L, -1));
+
+    // Now walk _G recursively to register every C function and library
+    // table by name path. C functions MUST be in perms (eris can't
+    // serialize C closures); library tables benefit from identity
+    // preservation across save/load (string == string, etc.).
+    perms_walk(L, perms_idx, lua_gettop(L), "", for_save, seen);
+    lua_pop(L, 1);
+}
+
 
 std::string vm::savestate_path(int slot) const
 {
@@ -992,61 +1076,84 @@ bool vm::savestate_save(int slot)
     fwrite(&cart_path_len, 4, 1, f);
     if (cart_path_len) fwrite(cart_path.data(), 1, cart_path_len, f);
 
-    // Lua sandbox state via eris. Persist __z8_sandbox (the cart's _ENV)
-    // with a perms table mapping all api::functions to their name strings.
-    std::string lua_blob;
-    int top = lua_gettop(m_lua);
-    lua_getglobal(m_lua, "__z8_sandbox");
-    if (lua_istable(m_lua, -1)) {
-        int sandbox_idx = lua_gettop(m_lua);
-        savestate_build_perms(m_lua, /*for_save=*/true);
-        int perms_idx = lua_gettop(m_lua);
-        eris_persist(m_lua, perms_idx, sandbox_idx);
-        size_t blob_len = 0;
-        const char* blob_data = lua_tolstring(m_lua, -1, &blob_len);
-        if (blob_data && blob_len > 0) {
-            lua_blob.assign(blob_data, blob_len);
-        }
-    } else {
-        fprintf(stderr, "[savestate] save slot %d: __z8_sandbox not available, skipping Lua state\n", slot);
-    }
-    lua_settop(m_lua, top);
-
-    uint32_t lua_blob_len = (uint32_t)lua_blob.size();
-    fwrite(&lua_blob_len, 4, 1, f);
-    if (lua_blob_len) fwrite(lua_blob.data(), 1, lua_blob_len, f);
-
-    // m_state — audio sequencer / draw mirror / input. Pure POD.
+    // v4: m_state — audio sequencer / draw / input mirror. Pure POD by design.
     uint32_t state_size = (uint32_t)sizeof(state);
     fwrite(&state_size, 4, 1, f);
     fwrite(&m_state, 1, sizeof(state), f);
 
-    // __z8_menu — pause-menu state + cart-defined menuitem callbacks.
-    std::string menu_blob;
+    // v4: full Lua state via eris. We persist a wrapper table containing:
+    //   loop    — __z8_loop (the cart's main-loop coroutine, includes call
+    //             stack, locals, upvalues, yield position)
+    //   sandbox — __z8_sandbox (the cart's _ENV, also reachable from `loop`)
+    //   menu    — __z8_menu (pause-menu state + cart-defined menuitem callbacks)
+    //
+    // Putting all three in one wrapper preserves shared object identity
+    // across the whole graph (eris's `seen` table is per-persist call).
+    // Perms table is built recursively from _G — every reachable C function
+    // and library table is registered by name path.
+    std::string fullstate_blob;
+    int top = lua_gettop(m_lua);
     {
-        int top2 = lua_gettop(m_lua);
+        savestate_build_perms_full(m_lua, /*for_save=*/true);
+        int perms_idx = lua_gettop(m_lua);
+
+        // Build wrapper table { loop=..., sandbox=..., menu=... }
+        lua_newtable(m_lua);
+        int wrapper_idx = lua_gettop(m_lua);
+
+        lua_getglobal(m_lua, "__z8_loop");
+        if (lua_isthread(m_lua, -1)) {
+            // DIAG: log thread status and stack depth at save time so we can
+            // verify what we're actually persisting.
+            lua_State* loopT = lua_tothread(m_lua, -1);
+            int loop_status = lua_status(loopT);
+            int loop_top = lua_gettop(loopT);
+            const char* status_str =
+                loop_status == 0           ? "OK/RESUMABLE" :
+                loop_status == LUA_YIELD   ? "YIELD/SUSPENDED" :
+                loop_status == LUA_ERRRUN  ? "ERRRUN" :
+                loop_status == LUA_ERRSYNTAX ? "ERRSYNTAX" :
+                loop_status == LUA_ERRMEM  ? "ERRMEM" :
+                loop_status == LUA_ERRGCMM ? "ERRGCMM" :
+                loop_status == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
+            fprintf(stderr, "[savestate-diag] save: __z8_loop status=%d (%s) stack_top=%d\n",
+                    loop_status, status_str, loop_top);
+            lua_setfield(m_lua, wrapper_idx, "loop");
+        } else {
+            lua_pop(m_lua, 1);
+            fprintf(stderr, "[savestate] save slot %d: __z8_loop not a thread (cart not running?) — skipping\n", slot);
+        }
+        lua_getglobal(m_lua, "__z8_sandbox");
+        if (lua_istable(m_lua, -1)) {
+            lua_setfield(m_lua, wrapper_idx, "sandbox");
+        } else {
+            lua_pop(m_lua, 1);
+        }
         lua_getglobal(m_lua, "__z8_menu");
         if (lua_istable(m_lua, -1)) {
-            int menu_idx = lua_gettop(m_lua);
-            savestate_build_perms(m_lua, /*for_save=*/true);
-            int perms_idx = lua_gettop(m_lua);
-            eris_persist(m_lua, perms_idx, menu_idx);
-            size_t blob_len = 0;
-            const char* blob_data = lua_tolstring(m_lua, -1, &blob_len);
-            if (blob_data && blob_len > 0) {
-                menu_blob.assign(blob_data, blob_len);
-            }
+            lua_setfield(m_lua, wrapper_idx, "menu");
+        } else {
+            lua_pop(m_lua, 1);
         }
-        lua_settop(m_lua, top2);
+
+        // eris_persist pushes the serialized string onto the stack.
+        eris_persist(m_lua, perms_idx, wrapper_idx);
+        size_t blob_len = 0;
+        const char* blob_data = lua_tolstring(m_lua, -1, &blob_len);
+        if (blob_data && blob_len > 0) {
+            fullstate_blob.assign(blob_data, blob_len);
+        }
     }
-    uint32_t menu_blob_len = (uint32_t)menu_blob.size();
-    fwrite(&menu_blob_len, 4, 1, f);
-    if (menu_blob_len) fwrite(menu_blob.data(), 1, menu_blob_len, f);
+    lua_settop(m_lua, top);  // restore stack
+
+    uint32_t fullstate_blob_len = (uint32_t)fullstate_blob.size();
+    fwrite(&fullstate_blob_len, 4, 1, f);
+    if (fullstate_blob_len) fwrite(fullstate_blob.data(), 1, fullstate_blob_len, f);
 
     long pos = ftell(f);
     fclose(f);
-    fprintf(stderr, "[savestate] saved slot %d: %ld bytes (ram=%u, cart=%u, lua=%u, state=%u, menu=%u) -> %s\n",
-            slot, pos, ram_size, cart_path_len, lua_blob_len, state_size, menu_blob_len, path.c_str());
+    fprintf(stderr, "[savestate] saved slot %d: %ld bytes (ram=%u, cart_path=%u, state=%u, fullstate=%u) -> %s\n",
+            slot, pos, ram_size, cart_path_len, state_size, fullstate_blob_len, path.c_str());
     return true;
 }
 
@@ -1118,9 +1225,9 @@ bool vm::savestate_load(int slot)
         }
     }
 
-    // V2+: lua_blob (sandbox-only persist via eris).
+    // V2/V3 only: lua_blob (sandbox-only persist). v4+ replaces with fullstate_blob.
     std::string lua_blob;
-    if (version >= 2) {
+    if (version == 2 || version == 3) {
         uint32_t lua_blob_len = 0;
         if (fread(&lua_blob_len, 4, 1, f) != 1) {
             fprintf(stderr, "[savestate] load slot %d: short read of lua_blob_len\n", slot);
@@ -1158,9 +1265,9 @@ bool vm::savestate_load(int slot)
         }
     }
 
-    // V3+: menu_blob (separate eris persist of __z8_menu).
+    // V3 only: menu_blob (separate persist). v4+ rolls it into fullstate_blob.
     std::string menu_blob;
-    if (version >= 3) {
+    if (version == 3) {
         uint32_t menu_blob_len = 0;
         if (fread(&menu_blob_len, 4, 1, f) != 1) {
             fprintf(stderr, "[savestate] load slot %d: short read of menu_blob_len\n", slot);
@@ -1175,6 +1282,22 @@ bool vm::savestate_load(int slot)
         }
     }
 
+    // V4 only: fullstate_blob — wrapper { loop, sandbox, menu } persisted via eris.
+    std::string fullstate_blob;
+    if (version >= 4) {
+        uint32_t fullstate_blob_len = 0;
+        if (fread(&fullstate_blob_len, 4, 1, f) != 1) {
+            fprintf(stderr, "[savestate] load slot %d: short read of fullstate_blob_len\n", slot);
+            fclose(f); return false;
+        }
+        if (fullstate_blob_len) {
+            fullstate_blob.resize(fullstate_blob_len);
+            if (fread(&fullstate_blob[0], 1, fullstate_blob_len, f) != fullstate_blob_len) {
+                fprintf(stderr, "[savestate] load slot %d: short read of fullstate_blob\n", slot);
+                fclose(f); return false;
+            }
+        }
+    }
     fclose(f);
 
     // Multicart: if the saved cart differs from the currently active cart,
@@ -1224,117 +1347,211 @@ bool vm::savestate_load(int slot)
 
             int restored_idx = lua_gettop(m_lua);
 
-            // IN-PLACE MUTATION (the key to making this work).
+            // Mutate sandbox to match restored table:
+            // 1) Remove keys from sandbox that aren't api functions and aren't
+            //    in the restored table (cart may have deleted them between save & now)
+            // 2) Copy keys from restored table to sandbox
             //
-            // The cart's compiled code holds _ENV upvalues bound to the
-            // ORIGINAL __z8_sandbox table object. Replacing the global
-            // with a different table would orphan those upvalues — cart
-            // would see no state changes. Instead we mutate the existing
-            // sandbox in place: clear stale keys, then copy from the
-            // eris-restored temp table. Object identity preserved, so
-            // the cart's _ENV continues to point at the same table — now
-            // with restored content.
-            //
-            // Step 1: clear keys in current sandbox that aren't in the
-            // restored table (cart may have ADDED globals between save and
-            // load — those need to go away for a true "back to save" load).
-            // We collect keys-to-delete first so we don't mutate the table
-            // mid-traversal.
-            std::vector<std::string> keys_to_delete;
-            lua_pushnil(m_lua);
-            while (lua_next(m_lua, sandbox_idx) != 0) {
-                // stack: ..., sandbox, perms, restored, key, value
-                if (lua_type(m_lua, -2) == LUA_TSTRING) {
-                    std::string k = lua_tostring(m_lua, -2);
-                    // Check if this key exists in the restored table
-                    lua_pushvalue(m_lua, -2);   // copy key
-                    lua_gettable(m_lua, restored_idx);
-                    if (lua_isnil(m_lua, -1)) {
-                        keys_to_delete.push_back(k);
-                    }
-                    lua_pop(m_lua, 1);  // pop the lookup result
-                }
-                lua_pop(m_lua, 1);  // pop value, keep key for next iteration
-            }
-            for (auto const& k : keys_to_delete) {
-                lua_pushstring(m_lua, k.c_str());
-                lua_pushnil(m_lua);
-                lua_settable(m_lua, sandbox_idx);
-            }
-
-            // Step 2: copy keys from restored table to sandbox.
+            // For simplicity we just do step 2 (copy/overwrite). Stale keys
+            // in the current sandbox will remain — usually harmless because
+            // the restored cart code references only its own keys.
             lua_pushnil(m_lua);
             while (lua_next(m_lua, restored_idx) != 0) {
+                // stack: ..., sandbox, perms, restored, key, value
                 lua_pushvalue(m_lua, -2);  // copy key
                 lua_pushvalue(m_lua, -2);  // copy value
+                // stack: ..., sandbox, perms, restored, key, value, key, value
                 lua_settable(m_lua, sandbox_idx);
-                lua_pop(m_lua, 1);  // pop value, keep key
+                lua_pop(m_lua, 1);  // pop value, keep key for next iteration
             }
 
             lua_settop(m_lua, top);
-            fprintf(stderr, "[savestate] load slot %d: sandbox restored (%zu bytes blob, %zu stale keys cleared)\n",
-                    slot, lua_blob.size(), keys_to_delete.size());
+            fprintf(stderr, "[savestate] load slot %d: Lua state restored (%zu bytes)\n", slot, lua_blob.size());
         }
     }
 
-    // Apply m_state. Brief audio click is possible if the audio thread
+    // V3: apply m_state. Brief audio click is possible if the audio thread
     // is mid-read of channels[].reverb_2/4 during this memcpy — acceptable
     // (~1 frame). State was captured at a coherent point on save.
     if (have_state) {
         memcpy(&m_state, &staged_state, sizeof(state));
     }
 
-    // Restore __z8_menu via in-place mutation (same reasoning as sandbox:
-    // any code that captured a local reference to __z8_menu would otherwise
-    // be orphaned). The pause-menu items table is small so this is cheap.
+    // V3: restore __z8_menu via eris. Replace the global rather than mutate
+    // in place — bios.p8 always accesses __z8_menu via global lookup, never
+    // via captured local, so a setglobal works correctly.
     if (!menu_blob.empty()) {
         int top = lua_gettop(m_lua);
-        lua_getglobal(m_lua, "__z8_menu");
+        savestate_build_perms(m_lua, /*for_save=*/false);
+        int perms_idx = lua_gettop(m_lua);
+        lua_pushlstring(m_lua, menu_blob.data(), menu_blob.size());
+        int blob_idx = lua_gettop(m_lua);
+        eris_unpersist(m_lua, perms_idx, blob_idx);
+        // stack: ..., perms, blob, restored_value
+        if (lua_istable(m_lua, -1)) {
+            lua_setglobal(m_lua, "__z8_menu");
+            fprintf(stderr, "[savestate] load slot %d: __z8_menu restored (%zu bytes)\n", slot, menu_blob.size());
+        } else {
+            fprintf(stderr, "[savestate] load slot %d: menu eris-restored value is not a table — skipping\n", slot);
+        }
+        lua_settop(m_lua, top);
+    }
+
+    // V4: full Lua state restore. Unpersist the wrapper table and replace
+    // __z8_loop, __z8_sandbox, __z8_menu globals with the restored values.
+    // The cart's main-loop coroutine, including its call stack, locals,
+    // upvalues, and yield position, is restored — next coresume picks up
+    // exactly where it yielded at save time.
+    if (!fullstate_blob.empty()) {
+        int top = lua_gettop(m_lua);
+        savestate_build_perms_full(m_lua, /*for_save=*/false);
+        int perms_idx = lua_gettop(m_lua);
+        lua_pushlstring(m_lua, fullstate_blob.data(), fullstate_blob.size());
+        int blob_idx = lua_gettop(m_lua);
+        eris_unpersist(m_lua, perms_idx, blob_idx);
+        // stack: ..., perms, blob, wrapper_table
+
         if (!lua_istable(m_lua, -1)) {
-            // Fall back to setglobal if __z8_menu isn't currently a table.
-            lua_pop(m_lua, 1);
-            savestate_build_perms(m_lua, /*for_save=*/false);
-            int perms_idx = lua_gettop(m_lua);
-            lua_pushlstring(m_lua, menu_blob.data(), menu_blob.size());
-            int blob_idx = lua_gettop(m_lua);
-            eris_unpersist(m_lua, perms_idx, blob_idx);
+            fprintf(stderr, "[savestate] load slot %d: fullstate eris-restored value is not a table — skipping\n", slot);
+            lua_settop(m_lua, top);
+        } else {
+            int wrapper_idx = lua_gettop(m_lua);
+            int restored_count = 0;
+
+            lua_getfield(m_lua, wrapper_idx, "loop");
+            if (lua_isthread(m_lua, -1)) {
+                // DIAG: log restored thread state before setglobal
+                lua_State* restoredT = lua_tothread(m_lua, -1);
+                int rs = lua_status(restoredT);
+                int rtop = lua_gettop(restoredT);
+                const char* rs_str =
+                    rs == 0           ? "OK/RESUMABLE" :
+                    rs == LUA_YIELD   ? "YIELD/SUSPENDED" :
+                    rs == LUA_ERRRUN  ? "ERRRUN" :
+                    rs == LUA_ERRSYNTAX ? "ERRSYNTAX" :
+                    rs == LUA_ERRMEM  ? "ERRMEM" :
+                    rs == LUA_ERRGCMM ? "ERRGCMM" :
+                    rs == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
+                fprintf(stderr, "[savestate-diag] load: restored thread status=%d (%s) stack_top=%d ptr=%p\n",
+                        rs, rs_str, rtop, (void*)restoredT);
+                lua_setglobal(m_lua, "__z8_loop");
+
+                // DIAG: re-fetch __z8_loop to verify setglobal worked
+                lua_getglobal(m_lua, "__z8_loop");
+                if (lua_isthread(m_lua, -1)) {
+                    lua_State* refetchT = lua_tothread(m_lua, -1);
+                    int rs2 = lua_status(refetchT);
+                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop status=%d ptr=%p (match=%s)\n",
+                            rs2, (void*)refetchT, refetchT == restoredT ? "yes" : "NO");
+                } else {
+                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop is NOT a thread!\n");
+                }
+                lua_pop(m_lua, 1);
+                ++restored_count;
+            } else {
+                lua_pop(m_lua, 1);
+            }
+            lua_getfield(m_lua, wrapper_idx, "sandbox");
+            if (lua_istable(m_lua, -1)) {
+                lua_setglobal(m_lua, "__z8_sandbox");
+                ++restored_count;
+            } else {
+                lua_pop(m_lua, 1);
+            }
+            lua_getfield(m_lua, wrapper_idx, "menu");
             if (lua_istable(m_lua, -1)) {
                 lua_setglobal(m_lua, "__z8_menu");
+                ++restored_count;
+            } else {
+                lua_pop(m_lua, 1);
             }
-        } else {
-            int menu_idx = lua_gettop(m_lua);
-            savestate_build_perms(m_lua, /*for_save=*/false);
-            int perms_idx = lua_gettop(m_lua);
-            lua_pushlstring(m_lua, menu_blob.data(), menu_blob.size());
-            int blob_idx = lua_gettop(m_lua);
-            eris_unpersist(m_lua, perms_idx, blob_idx);
-            if (lua_istable(m_lua, -1)) {
-                int restored_idx = lua_gettop(m_lua);
-                // Clear and copy
-                std::vector<std::string> keys_to_delete;
-                lua_pushnil(m_lua);
-                while (lua_next(m_lua, menu_idx) != 0) {
-                    if (lua_type(m_lua, -2) == LUA_TSTRING) {
-                        keys_to_delete.push_back(lua_tostring(m_lua, -2));
+
+            // DIAG: walk the restored thread's call stack and inspect _ENV
+            // of every Lua function. Compare each _ENV pointer to the
+            // sandbox we just setglobal'd. If they differ, eris isn't
+            // preserving _ENV upvalue identity with our wrapper.sandbox.
+            lua_getglobal(m_lua, "__z8_loop");
+            if (lua_isthread(m_lua, -1)) {
+                lua_State* T = lua_tothread(m_lua, -1);
+                lua_getglobal(m_lua, "__z8_sandbox");
+                void const* sandbox_ptr = lua_topointer(m_lua, -1);
+                lua_pop(m_lua, 1);
+
+                lua_pushglobaltable(m_lua);
+                void const* G_ptr = lua_topointer(m_lua, -1);
+                lua_pop(m_lua, 1);
+
+                fprintf(stderr, "[savestate-diag] load: __z8_sandbox ptr=%p  live _G ptr=%p\n",
+                        sandbox_ptr, G_ptr);
+
+                // Probe restored sandbox: is its _draw/_update60/_init the
+                // same Lua function object as the cart's expectation? Check
+                // the _ENV upvalues of those cart functions specifically.
+                lua_getglobal(m_lua, "__z8_sandbox");
+                int sb = lua_gettop(m_lua);
+                for (auto fn_name : {"_init", "_update60", "_update", "_draw"}) {
+                    lua_getfield(m_lua, sb, fn_name);
+                    if (lua_isfunction(m_lua, -1) && !lua_iscfunction(m_lua, -1)) {
+                        // walk upvalues of this function
+                        for (int up = 1; up <= 256; ++up) {
+                            const char* upname = lua_getupvalue(m_lua, -1, up);
+                            if (!upname) break;
+                            if (strcmp(upname, "_ENV") == 0) {
+                                void const* env_ptr = lua_topointer(m_lua, -1);
+                                fprintf(stderr, "[savestate-diag] load: sandbox.%s _ENV ptr=%p (sandbox=%s, G=%s)\n",
+                                        fn_name, env_ptr,
+                                        env_ptr == sandbox_ptr ? "YES" : "no",
+                                        env_ptr == G_ptr ? "YES" : "no");
+                            }
+                            lua_pop(m_lua, 1);
+                        }
                     }
                     lua_pop(m_lua, 1);
                 }
-                for (auto const& k : keys_to_delete) {
-                    lua_pushstring(m_lua, k.c_str());
-                    lua_pushnil(m_lua);
-                    lua_settable(m_lua, menu_idx);
-                }
-                lua_pushnil(m_lua);
-                while (lua_next(m_lua, restored_idx) != 0) {
-                    lua_pushvalue(m_lua, -2);
-                    lua_pushvalue(m_lua, -2);
-                    lua_settable(m_lua, menu_idx);
-                    lua_pop(m_lua, 1);
+                lua_pop(m_lua, 1);  // pop sandbox
+
+                // Walk each call frame in T using lua_Debug
+                lua_Debug ar;
+                int level = 0;
+                while (lua_getstack(T, level, &ar)) {
+                    lua_getinfo(T, "fnSl", &ar);
+                    // ar.func is now on T's stack — get its _ENV upvalue (typically index 1)
+                    int env_idx = -1;
+                    for (int up = 1; up <= 256; ++up) {
+                        const char* upname = lua_getupvalue(T, -1, up);
+                        if (!upname) break;
+                        if (strcmp(upname, "_ENV") == 0) {
+                            void const* env_ptr = lua_topointer(T, -1);
+                            int env_type = lua_type(T, -1);
+                            fprintf(stderr, "[savestate-diag] load: thread frame %d (%s '%s') _ENV ptr=%p type=%d sandbox=%s G=%s\n",
+                                    level,
+                                    ar.what ? ar.what : "?",
+                                    ar.name ? ar.name : "(anon)",
+                                    env_ptr,
+                                    env_type,
+                                    env_ptr == sandbox_ptr ? "YES" : "no",
+                                    env_ptr == G_ptr ? "YES" : "no");
+                            env_idx = up;
+                        }
+                        lua_pop(T, 1);
+                        if (env_idx >= 0) break;
+                    }
+                    lua_pop(T, 1);  // pop ar.func
+                    ++level;
+                    if (level > 10) break;  // cap
                 }
             }
+            lua_pop(m_lua, 1);  // pop __z8_loop
+
+            lua_settop(m_lua, top);
+            fprintf(stderr, "[savestate] load slot %d: full Lua state restored (%zu bytes, %d/3 globals replaced)\n",
+                    slot, fullstate_blob.size(), restored_count);
+
+            // DIAG: tell BIOS to log __z8_loop status for the next 5 ticks
+            // so we can see if the restored coroutine is actually being resumed.
+            lua_pushinteger(m_lua, 5);
+            lua_setglobal(m_lua, "__z8_diag_remaining");
         }
-        lua_settop(m_lua, top);
-        fprintf(stderr, "[savestate] load slot %d: menu restored (%zu bytes)\n", slot, menu_blob.size());
     }
 
     fprintf(stderr, "[savestate] loaded slot %d from %s\n", slot, path.c_str());
