@@ -1181,6 +1181,23 @@ bool vm::savestate_load(int slot)
     // private_load() the saved one first. That restarts the Lua VM with
     // the saved cart's code; we then apply the m_ram + Lua-state restore
     // on top of the freshly-initialized state.
+    //
+    // CRITICAL ordering issue (fixed 2026-05-03 after Virtua Racing report):
+    //   run() creates a fresh __z8_loop coroutine but DOES NOT execute it.
+    //   The coroutine runs only on the next __z8_tick (next frame's
+    //   coresume). If we apply our memcpy(m_ram) + mutate(sandbox) right
+    //   after run(), the cart's setup code runs LATER and clobbers our
+    //   restored state with default values from the cart's top-level
+    //   chunk. Result: load goes to default state instead of saved state
+    //   (Virtua Racing showed track 1 instead of saved track 2 on the
+    //   first load after a Reset; second load worked because no mismatch
+    //   reload).
+    //
+    //   Fix: drive the new coroutine through its full setup phase (one
+    //   resume reaches first flip-yield, after _init has run) BEFORE
+    //   applying our state. Then memcpy/mutate overwrites the now-
+    //   default state with saved values; the next coresume continues
+    //   from the yielded frame-1 position with saved state in place.
     if (!saved_cart_path.empty() && saved_cart_path != m_cart.get_filename()) {
         fprintf(stderr, "[savestate] load slot %d: cart mismatch — restarting with %s\n",
                 slot, saved_cart_path.c_str());
@@ -1189,7 +1206,24 @@ bool vm::savestate_load(int slot)
                     slot, saved_cart_path.c_str());
             return false;
         }
-        run();  // re-run the cart's _init() etc. via __z8_run_cart
+        run();  // creates the __z8_loop coroutine (suspended at start)
+
+        // Force the new coroutine to actually execute its setup. Without
+        // this the cart's top-level code (which initializes its globals)
+        // hasn't run yet — so our subsequent in-place mutation of
+        // __z8_sandbox would be clobbered by the cart's first coresume.
+        lua_getglobal(m_lua, "__z8_loop");
+        if (lua_isthread(m_lua, -1)) {
+            lua_State* T = lua_tothread(m_lua, -1);
+            int rc = lua_resume(T, NULL, 0);
+            if (rc != LUA_YIELD && rc != LUA_OK) {
+                size_t errlen = 0;
+                const char* errmsg = lua_tolstring(T, -1, &errlen);
+                fprintf(stderr, "[savestate] load slot %d: cart-restart resume returned %d: %s\n",
+                        slot, rc, errmsg ? errmsg : "(no message)");
+            }
+        }
+        lua_pop(m_lua, 1);
     }
 
     // Apply m_ram (overwrites cart-init memory state).
