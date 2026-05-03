@@ -81,16 +81,11 @@ static void signal_handler(int sig)
     // When the process dies, the FPGA ring buffer drains to silence.
 }
 
-// Save-state request flags. Signal handlers set these; the main loop
-// polls them between frames and dispatches the actual save/load.
-// Phase 1A uses SIGUSR1=save slot 0 and SIGUSR2=load slot 0 for SSH-driven
-// testing. Phase 2 replaces this with a DDR3 control word the FPGA writes
-// when the OSD save-state UI fires.
+// Save-state request flags. Set by the FPGA save-state UI dispatch path
+// (DDR3 control word, polled between frames). Main loop dispatches
+// the actual save/load when one of these is set.
 static volatile int g_savestate_save_request = -1;  // slot 0..3, or -1
 static volatile int g_savestate_load_request = -1;
-
-static void savestate_save_signal(int sig) { (void)sig; g_savestate_save_request = 0; }
-static void savestate_load_signal(int sig) { (void)sig; g_savestate_load_request = 0; }
 
 // ── Audio thread — DDR3 ring buffer writer ───────────────────────────
 // Renders 22050Hz mono from zepto8, upsamples to 48KHz stereo,
@@ -390,10 +385,6 @@ int main(int argc, char **argv)
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    // Phase 1A save-state testing: SSH `kill -USR1 <pid>` saves to slot 0,
-    // `kill -USR2 <pid>` loads slot 0. To be replaced by DDR3 trigger in Phase 2.
-    signal(SIGUSR1, savestate_save_signal);
-    signal(SIGUSR2, savestate_load_signal);
 
     // ── Init SDL ──────────────────────────────────────────────────────
     // In native video mode, use SDL's dummy video driver — this gives us
@@ -620,11 +611,10 @@ int main(int argc, char **argv)
         while (g_running && game_running)
     {
         // ── Save-state request handling ──────────────────────────────
-        // Sources: (1) FPGA savestate_ui via DDR3 control word from the
-        // OSD pause-menu and F1-F4 keyboard shortcuts (Phase 3), and
-        // (2) SIGUSR1/SIGUSR2 fallback for SSH-driven testing (Phase 1A).
-        // Both feed the same request flags; dispatched here between frames
-        // so the VM and audio thread are at a clean state boundary.
+        // Source: FPGA savestate_ui via DDR3 control word from the OSD
+        // pause-menu and F1-F4 keyboard shortcuts. Dispatched here
+        // between frames so the VM and audio thread are at a clean
+        // state boundary.
         {
             static uint8_t ss_last_seq    = 0;
             static bool    ss_seq_seeded  = false;
