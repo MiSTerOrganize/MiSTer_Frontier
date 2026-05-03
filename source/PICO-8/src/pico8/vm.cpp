@@ -27,7 +27,8 @@
 #include <chrono>
 #include <ctime>
 #include <cassert>
-#include <unordered_set>  // perms_walk cycle detection
+#include <unordered_set>  // perms_walk + env-rewrite cycle detection
+#include <vector>         // staging keys-to-delete during in-place mutation
 #include <sstream> // std::stringstream
 
 #include "pico8/pico8.h"
@@ -1027,6 +1028,143 @@ static void savestate_build_perms_full(lua_State* L, bool for_save)
     lua_pop(L, 1);
 }
 
+// rewrite_env_upvalues — after eris unpersist, walk the restored object
+// graph (table, function, thread) and rewrite every Lua function's _ENV
+// upvalue that points at `old_target` to point at the value at
+// `new_target_idx_in_L` (a table on L's stack).
+//
+// Why this exists: eris preserves identity within a single persist call,
+// so the cart's compiled functions in the restored sandbox have _ENV
+// pointing at the restored sandbox table. But we want them to use the
+// LIVE existing __z8_sandbox table (so that any code outside the cart
+// coroutine — BIOS code on the main thread — sees the same table).
+//
+// We rewrite _ENV upvalues from restored→live for both the sandbox and
+// the menu, then in-place mutate the live tables to have restored content.
+// Net result: cart's compiled functions point at LIVE sandbox/menu, and
+// LIVE sandbox/menu have the restored values. Identity preserved, content
+// restored, and the coroutine's call stack survives.
+//
+// `L` is the main thread (m_lua). For functions in tables in L's stack we
+// operate directly. For functions in a thread T's call frames, we use T's
+// own stack (lua_getupvalue/setupvalue work on whatever thread holds the
+// function value).
+static void rewrite_env_upvalues_walk(
+    lua_State* L,
+    int value_idx,
+    void const* old_target,
+    int new_target_idx,
+    std::unordered_set<void const*>& seen,
+    int depth);
+
+static void rewrite_env_upvalues_in_thread(
+    lua_State* L,             // main thread (holds new_target on its stack)
+    lua_State* T,             // the thread whose call frames to rewrite
+    void const* old_target,
+    int new_target_idx,
+    std::unordered_set<void const*>& seen,
+    int depth);
+
+static void rewrite_env_upvalues_walk(
+    lua_State* L,
+    int value_idx,
+    void const* old_target,
+    int new_target_idx,
+    std::unordered_set<void const*>& seen,
+    int depth)
+{
+    if (depth > 64) return;
+    value_idx = lua_absindex(L, value_idx);
+    new_target_idx = lua_absindex(L, new_target_idx);
+
+    int t = lua_type(L, value_idx);
+
+    if (t == LUA_TTABLE) {
+        void const* p = lua_topointer(L, value_idx);
+        if (!p || !seen.insert(p).second) return;
+
+        lua_pushnil(L);
+        while (lua_next(L, value_idx)) {
+            // stack: ..., key, value
+            rewrite_env_upvalues_walk(L, lua_gettop(L), old_target, new_target_idx, seen, depth + 1);
+            lua_pop(L, 1);
+        }
+    }
+    else if (t == LUA_TFUNCTION && !lua_iscfunction(L, value_idx)) {
+        void const* p = lua_topointer(L, value_idx);
+        if (!p || !seen.insert(p).second) return;
+
+        for (int up = 1; ; ++up) {
+            const char* name = lua_getupvalue(L, value_idx, up);
+            if (!name) break;
+
+            // stack: ..., upvalue_value
+            if (strcmp(name, "_ENV") == 0
+                && lua_type(L, -1) == LUA_TTABLE
+                && lua_topointer(L, -1) == old_target)
+            {
+                lua_pop(L, 1);                      // drop the original
+                lua_pushvalue(L, new_target_idx);   // push live target
+                lua_setupvalue(L, value_idx, up);   // overwrites and pops
+                continue;
+            }
+            // Recurse into the upvalue (might be a table containing more
+            // functions, or another function with its own upvalues).
+            rewrite_env_upvalues_walk(L, lua_gettop(L), old_target, new_target_idx, seen, depth + 1);
+            lua_pop(L, 1);
+        }
+    }
+    else if (t == LUA_TTHREAD) {
+        lua_State* T = lua_tothread(L, value_idx);
+        if (!T) return;
+        if (!seen.insert((void const*)T).second) return;
+        rewrite_env_upvalues_in_thread(L, T, old_target, new_target_idx, seen, depth + 1);
+    }
+}
+
+static void rewrite_env_upvalues_in_thread(
+    lua_State* L,
+    lua_State* T,
+    void const* old_target,
+    int new_target_idx,
+    std::unordered_set<void const*>& seen,
+    int depth)
+{
+    if (depth > 64) return;
+
+    lua_Debug ar;
+    for (int level = 0; lua_getstack(T, level, &ar); ++level) {
+        if (level > 64) break;
+        if (!lua_getinfo(T, "f", &ar)) continue;
+        // T's stack now: ..., function
+
+        if (lua_iscfunction(T, -1)) {
+            lua_pop(T, 1);
+            continue;
+        }
+
+        // Walk this Lua function's upvalues
+        for (int up = 1; ; ++up) {
+            const char* name = lua_getupvalue(T, -1, up);
+            if (!name) break;
+
+            // T's stack: ..., function, upvalue_value
+            if (strcmp(name, "_ENV") == 0
+                && lua_type(T, -1) == LUA_TTABLE
+                && lua_topointer(T, -1) == old_target)
+            {
+                lua_pop(T, 1);                       // drop original
+                lua_pushvalue(L, new_target_idx);    // push on L
+                lua_xmove(L, T, 1);                  // move L→T
+                // T's stack: ..., function, new_target
+                lua_setupvalue(T, -2, up);           // overwrites and pops
+                continue;
+            }
+            lua_pop(T, 1);  // pop upvalue, keep function
+        }
+        lua_pop(T, 1);  // pop function
+    }
+}
 
 std::string vm::savestate_path(int slot) const
 {
@@ -1103,21 +1241,6 @@ bool vm::savestate_save(int slot)
 
         lua_getglobal(m_lua, "__z8_loop");
         if (lua_isthread(m_lua, -1)) {
-            // DIAG: log thread status and stack depth at save time so we can
-            // verify what we're actually persisting.
-            lua_State* loopT = lua_tothread(m_lua, -1);
-            int loop_status = lua_status(loopT);
-            int loop_top = lua_gettop(loopT);
-            const char* status_str =
-                loop_status == 0           ? "OK/RESUMABLE" :
-                loop_status == LUA_YIELD   ? "YIELD/SUSPENDED" :
-                loop_status == LUA_ERRRUN  ? "ERRRUN" :
-                loop_status == LUA_ERRSYNTAX ? "ERRSYNTAX" :
-                loop_status == LUA_ERRMEM  ? "ERRMEM" :
-                loop_status == LUA_ERRGCMM ? "ERRGCMM" :
-                loop_status == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
-            fprintf(stderr, "[savestate-diag] save: __z8_loop status=%d (%s) stack_top=%d\n",
-                    loop_status, status_str, loop_top);
             lua_setfield(m_lua, wrapper_idx, "loop");
         } else {
             lua_pop(m_lua, 1);
@@ -1370,38 +1493,42 @@ bool vm::savestate_load(int slot)
         }
     }
 
-    // V3: apply m_state. Brief audio click is possible if the audio thread
+    // Apply m_state. Brief audio click is possible if the audio thread
     // is mid-read of channels[].reverb_2/4 during this memcpy — acceptable
     // (~1 frame). State was captured at a coherent point on save.
     if (have_state) {
         memcpy(&m_state, &staged_state, sizeof(state));
     }
 
-    // V3: restore __z8_menu via eris. Replace the global rather than mutate
-    // in place — bios.p8 always accesses __z8_menu via global lookup, never
-    // via captured local, so a setglobal works correctly.
-    if (!menu_blob.empty()) {
-        int top = lua_gettop(m_lua);
-        savestate_build_perms(m_lua, /*for_save=*/false);
-        int perms_idx = lua_gettop(m_lua);
-        lua_pushlstring(m_lua, menu_blob.data(), menu_blob.size());
-        int blob_idx = lua_gettop(m_lua);
-        eris_unpersist(m_lua, perms_idx, blob_idx);
-        // stack: ..., perms, blob, restored_value
-        if (lua_istable(m_lua, -1)) {
-            lua_setglobal(m_lua, "__z8_menu");
-            fprintf(stderr, "[savestate] load slot %d: __z8_menu restored (%zu bytes)\n", slot, menu_blob.size());
-        } else {
-            fprintf(stderr, "[savestate] load slot %d: menu eris-restored value is not a table — skipping\n", slot);
-        }
-        lua_settop(m_lua, top);
-    }
-
-    // V4: full Lua state restore. Unpersist the wrapper table and replace
-    // __z8_loop, __z8_sandbox, __z8_menu globals with the restored values.
-    // The cart's main-loop coroutine, including its call stack, locals,
-    // upvalues, and yield position, is restored — next coresume picks up
-    // exactly where it yielded at save time.
+    // V4: full Lua state restore (clean implementation).
+    //
+    // The challenge: eris unpersist creates fresh table objects for the
+    // restored sandbox and menu. The cart's compiled functions that ride
+    // along inside those tables have _ENV upvalues that point at the
+    // FRESH (eris-created) tables. If we simply lua_setglobal those fresh
+    // tables, BIOS code on the main thread (which references __z8_sandbox
+    // via global lookup) would see the new tables — but cart functions
+    // that the BIOS later invokes via the cart sandbox would still read
+    // through their own _ENV upvalue, which is the new sandbox. That part
+    // is internally consistent. The bug surfaces because cart code that
+    // referenced things in _G (BIOS env) — through aliases or through
+    // BIOS functions on the call stack — was running through the new
+    // sandbox's _ENV chain, while BIOS code on the main thread runs
+    // through the live _G. Two different views, one cart.
+    //
+    // Solution: KEEP the existing live __z8_sandbox and __z8_menu tables.
+    // Walk every Lua function reachable from the wrapper (and from the
+    // restored thread's call stack), and for each function whose _ENV
+    // upvalue points at the eris-restored sandbox/menu, REWRITE that
+    // upvalue to point at the LIVE sandbox/menu. Then mutate the live
+    // tables in place to have the restored content.
+    //
+    // After this, every reference to "the sandbox" anywhere in the
+    // restored object graph points at the live __z8_sandbox table —
+    // which now holds the restored values. Cart code, BIOS code on
+    // the main thread, and BIOS code in the cart's coroutine all see
+    // the same table. Identity preserved, content restored, coroutine
+    // call stack survives intact.
     if (!fullstate_blob.empty()) {
         int top = lua_gettop(m_lua);
         savestate_build_perms_full(m_lua, /*for_save=*/false);
@@ -1412,145 +1539,138 @@ bool vm::savestate_load(int slot)
         // stack: ..., perms, blob, wrapper_table
 
         if (!lua_istable(m_lua, -1)) {
-            fprintf(stderr, "[savestate] load slot %d: fullstate eris-restored value is not a table — skipping\n", slot);
+            fprintf(stderr, "[savestate] load slot %d: fullstate eris-restored value is not a table\n", slot);
             lua_settop(m_lua, top);
         } else {
             int wrapper_idx = lua_gettop(m_lua);
-            int restored_count = 0;
 
-            lua_getfield(m_lua, wrapper_idx, "loop");
-            if (lua_isthread(m_lua, -1)) {
-                // DIAG: log restored thread state before setglobal
-                lua_State* restoredT = lua_tothread(m_lua, -1);
-                int rs = lua_status(restoredT);
-                int rtop = lua_gettop(restoredT);
-                const char* rs_str =
-                    rs == 0           ? "OK/RESUMABLE" :
-                    rs == LUA_YIELD   ? "YIELD/SUSPENDED" :
-                    rs == LUA_ERRRUN  ? "ERRRUN" :
-                    rs == LUA_ERRSYNTAX ? "ERRSYNTAX" :
-                    rs == LUA_ERRMEM  ? "ERRMEM" :
-                    rs == LUA_ERRGCMM ? "ERRGCMM" :
-                    rs == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
-                fprintf(stderr, "[savestate-diag] load: restored thread status=%d (%s) stack_top=%d ptr=%p\n",
-                        rs, rs_str, rtop, (void*)restoredT);
-                lua_setglobal(m_lua, "__z8_loop");
-
-                // DIAG: re-fetch __z8_loop to verify setglobal worked
-                lua_getglobal(m_lua, "__z8_loop");
-                if (lua_isthread(m_lua, -1)) {
-                    lua_State* refetchT = lua_tothread(m_lua, -1);
-                    int rs2 = lua_status(refetchT);
-                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop status=%d ptr=%p (match=%s)\n",
-                            rs2, (void*)refetchT, refetchT == restoredT ? "yes" : "NO");
-                } else {
-                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop is NOT a thread!\n");
-                }
-                lua_pop(m_lua, 1);
-                ++restored_count;
-            } else {
-                lua_pop(m_lua, 1);
-            }
+            // Get the eris-restored objects' pointers (for upvalue match).
             lua_getfield(m_lua, wrapper_idx, "sandbox");
-            if (lua_istable(m_lua, -1)) {
-                lua_setglobal(m_lua, "__z8_sandbox");
-                ++restored_count;
-            } else {
-                lua_pop(m_lua, 1);
-            }
+            void const* restored_sbox_ptr = lua_istable(m_lua, -1) ? lua_topointer(m_lua, -1) : nullptr;
+            lua_pop(m_lua, 1);
             lua_getfield(m_lua, wrapper_idx, "menu");
-            if (lua_istable(m_lua, -1)) {
-                lua_setglobal(m_lua, "__z8_menu");
-                ++restored_count;
+            void const* restored_menu_ptr = lua_istable(m_lua, -1) ? lua_topointer(m_lua, -1) : nullptr;
+            lua_pop(m_lua, 1);
+
+            // Push the LIVE sandbox + menu tables (these are our rewrite
+            // targets — every _ENV pointing at restored_sbox_ptr will be
+            // overwritten to point at this live table).
+            lua_getglobal(m_lua, "__z8_sandbox");
+            int live_sbox_idx = lua_gettop(m_lua);
+            lua_getglobal(m_lua, "__z8_menu");
+            int live_menu_idx = lua_gettop(m_lua);
+
+            bool live_sbox_ok = lua_istable(m_lua, live_sbox_idx);
+            bool live_menu_ok = lua_istable(m_lua, live_menu_idx);
+
+            // Rewrite _ENV upvalues throughout the wrapper graph.
+            if (live_sbox_ok && restored_sbox_ptr) {
+                std::unordered_set<void const*> seen;
+                rewrite_env_upvalues_walk(m_lua, wrapper_idx, restored_sbox_ptr, live_sbox_idx, seen, 0);
+            }
+            if (live_menu_ok && restored_menu_ptr) {
+                std::unordered_set<void const*> seen;
+                rewrite_env_upvalues_walk(m_lua, wrapper_idx, restored_menu_ptr, live_menu_idx, seen, 0);
+            }
+
+            // Replace __z8_loop with the restored coroutine. Its call
+            // frames now have _ENV upvalues pointing at the live sandbox
+            // (rewritten above). BIOS code on the main thread reads
+            // __z8_loop via global lookup — picks up the new value.
+            lua_getfield(m_lua, wrapper_idx, "loop");
+            bool loop_ok = lua_isthread(m_lua, -1);
+            if (loop_ok) {
+                lua_setglobal(m_lua, "__z8_loop");
             } else {
                 lua_pop(m_lua, 1);
             }
 
-            // DIAG: walk the restored thread's call stack and inspect _ENV
-            // of every Lua function. Compare each _ENV pointer to the
-            // sandbox we just setglobal'd. If they differ, eris isn't
-            // preserving _ENV upvalue identity with our wrapper.sandbox.
-            lua_getglobal(m_lua, "__z8_loop");
-            if (lua_isthread(m_lua, -1)) {
-                lua_State* T = lua_tothread(m_lua, -1);
-                lua_getglobal(m_lua, "__z8_sandbox");
-                void const* sandbox_ptr = lua_topointer(m_lua, -1);
-                lua_pop(m_lua, 1);
+            // In-place mutate live __z8_sandbox to have restored content.
+            // Step 1: clear keys that exist in live but not in restored.
+            // Step 2: copy keys from restored to live.
+            int sandbox_keys_cleared = 0;
+            int sandbox_keys_copied = 0;
+            if (live_sbox_ok && restored_sbox_ptr) {
+                lua_getfield(m_lua, wrapper_idx, "sandbox");
+                int restored_idx = lua_gettop(m_lua);
 
-                lua_pushglobaltable(m_lua);
-                void const* G_ptr = lua_topointer(m_lua, -1);
-                lua_pop(m_lua, 1);
-
-                fprintf(stderr, "[savestate-diag] load: __z8_sandbox ptr=%p  live _G ptr=%p\n",
-                        sandbox_ptr, G_ptr);
-
-                // Probe restored sandbox: is its _draw/_update60/_init the
-                // same Lua function object as the cart's expectation? Check
-                // the _ENV upvalues of those cart functions specifically.
-                lua_getglobal(m_lua, "__z8_sandbox");
-                int sb = lua_gettop(m_lua);
-                for (auto fn_name : {"_init", "_update60", "_update", "_draw"}) {
-                    lua_getfield(m_lua, sb, fn_name);
-                    if (lua_isfunction(m_lua, -1) && !lua_iscfunction(m_lua, -1)) {
-                        // walk upvalues of this function
-                        for (int up = 1; up <= 256; ++up) {
-                            const char* upname = lua_getupvalue(m_lua, -1, up);
-                            if (!upname) break;
-                            if (strcmp(upname, "_ENV") == 0) {
-                                void const* env_ptr = lua_topointer(m_lua, -1);
-                                fprintf(stderr, "[savestate-diag] load: sandbox.%s _ENV ptr=%p (sandbox=%s, G=%s)\n",
-                                        fn_name, env_ptr,
-                                        env_ptr == sandbox_ptr ? "YES" : "no",
-                                        env_ptr == G_ptr ? "YES" : "no");
-                            }
-                            lua_pop(m_lua, 1);
+                std::vector<std::string> keys_to_delete;
+                lua_pushnil(m_lua);
+                while (lua_next(m_lua, live_sbox_idx)) {
+                    if (lua_type(m_lua, -2) == LUA_TSTRING) {
+                        std::string k = lua_tostring(m_lua, -2);
+                        lua_pushvalue(m_lua, -2);
+                        lua_gettable(m_lua, restored_idx);
+                        if (lua_isnil(m_lua, -1)) {
+                            keys_to_delete.push_back(k);
                         }
+                        lua_pop(m_lua, 1);
                     }
                     lua_pop(m_lua, 1);
                 }
-                lua_pop(m_lua, 1);  // pop sandbox
-
-                // Walk each call frame in T using lua_Debug
-                lua_Debug ar;
-                int level = 0;
-                while (lua_getstack(T, level, &ar)) {
-                    lua_getinfo(T, "fnSl", &ar);
-                    // ar.func is now on T's stack — get its _ENV upvalue (typically index 1)
-                    int env_idx = -1;
-                    for (int up = 1; up <= 256; ++up) {
-                        const char* upname = lua_getupvalue(T, -1, up);
-                        if (!upname) break;
-                        if (strcmp(upname, "_ENV") == 0) {
-                            void const* env_ptr = lua_topointer(T, -1);
-                            int env_type = lua_type(T, -1);
-                            fprintf(stderr, "[savestate-diag] load: thread frame %d (%s '%s') _ENV ptr=%p type=%d sandbox=%s G=%s\n",
-                                    level,
-                                    ar.what ? ar.what : "?",
-                                    ar.name ? ar.name : "(anon)",
-                                    env_ptr,
-                                    env_type,
-                                    env_ptr == sandbox_ptr ? "YES" : "no",
-                                    env_ptr == G_ptr ? "YES" : "no");
-                            env_idx = up;
-                        }
-                        lua_pop(T, 1);
-                        if (env_idx >= 0) break;
-                    }
-                    lua_pop(T, 1);  // pop ar.func
-                    ++level;
-                    if (level > 10) break;  // cap
+                for (auto const& k : keys_to_delete) {
+                    lua_pushstring(m_lua, k.c_str());
+                    lua_pushnil(m_lua);
+                    lua_settable(m_lua, live_sbox_idx);
                 }
+                sandbox_keys_cleared = (int)keys_to_delete.size();
+
+                lua_pushnil(m_lua);
+                while (lua_next(m_lua, restored_idx)) {
+                    lua_pushvalue(m_lua, -2);
+                    lua_pushvalue(m_lua, -2);
+                    lua_settable(m_lua, live_sbox_idx);
+                    lua_pop(m_lua, 1);
+                    ++sandbox_keys_copied;
+                }
+                lua_pop(m_lua, 1);  // pop wrapper.sandbox
             }
-            lua_pop(m_lua, 1);  // pop __z8_loop
+
+            // Same for __z8_menu.
+            int menu_keys_cleared = 0;
+            int menu_keys_copied = 0;
+            if (live_menu_ok && restored_menu_ptr) {
+                lua_getfield(m_lua, wrapper_idx, "menu");
+                int restored_idx = lua_gettop(m_lua);
+
+                std::vector<std::string> keys_to_delete;
+                lua_pushnil(m_lua);
+                while (lua_next(m_lua, live_menu_idx)) {
+                    if (lua_type(m_lua, -2) == LUA_TSTRING) {
+                        std::string k = lua_tostring(m_lua, -2);
+                        lua_pushvalue(m_lua, -2);
+                        lua_gettable(m_lua, restored_idx);
+                        if (lua_isnil(m_lua, -1)) {
+                            keys_to_delete.push_back(k);
+                        }
+                        lua_pop(m_lua, 1);
+                    }
+                    lua_pop(m_lua, 1);
+                }
+                for (auto const& k : keys_to_delete) {
+                    lua_pushstring(m_lua, k.c_str());
+                    lua_pushnil(m_lua);
+                    lua_settable(m_lua, live_menu_idx);
+                }
+                menu_keys_cleared = (int)keys_to_delete.size();
+
+                lua_pushnil(m_lua);
+                while (lua_next(m_lua, restored_idx)) {
+                    lua_pushvalue(m_lua, -2);
+                    lua_pushvalue(m_lua, -2);
+                    lua_settable(m_lua, live_menu_idx);
+                    lua_pop(m_lua, 1);
+                    ++menu_keys_copied;
+                }
+                lua_pop(m_lua, 1);  // pop wrapper.menu
+            }
 
             lua_settop(m_lua, top);
-            fprintf(stderr, "[savestate] load slot %d: full Lua state restored (%zu bytes, %d/3 globals replaced)\n",
-                    slot, fullstate_blob.size(), restored_count);
-
-            // DIAG: tell BIOS to log __z8_loop status for the next 5 ticks
-            // so we can see if the restored coroutine is actually being resumed.
-            lua_pushinteger(m_lua, 5);
-            lua_setglobal(m_lua, "__z8_diag_remaining");
+            fprintf(stderr, "[savestate] load slot %d: full state restored (%zu bytes, loop=%s, sandbox=%d/%dkeys, menu=%d/%dkeys)\n",
+                    slot, fullstate_blob.size(),
+                    loop_ok ? "ok" : "skipped",
+                    sandbox_keys_cleared, sandbox_keys_copied,
+                    menu_keys_cleared, menu_keys_copied);
         }
     }
 
