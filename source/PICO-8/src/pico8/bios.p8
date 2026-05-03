@@ -460,13 +460,6 @@ end
 
 -- FIXME: this function is quite a mess
 function __z8_tick()
-    -- DIAG: log status of __z8_loop on first 5 ticks after a load,
-    -- so we can see whether the restored coroutine is being used / resumed.
-    if __z8_diag_remaining and __z8_diag_remaining > 0 then
-        printh("[diag] tick: status="..costatus(__z8_loop).." paused="..tostr(__z8_paused).." frames_left="..__z8_diag_remaining)
-        __z8_diag_remaining = __z8_diag_remaining - 1
-    end
-
     if (costatus(__z8_loop) == "dead") return -1
 
     __z8_button_updated = false
@@ -480,9 +473,6 @@ function __z8_tick()
         __z8_frame_hold = false
     else
         ret, err = coresume(__z8_loop)
-        if __z8_diag_remaining and __z8_diag_remaining > 0 then
-            printh("[diag] coresume: ret="..tostr(ret).." err="..tostr(err).." status_after="..costatus(__z8_loop))
-        end
 
         -- do not use btnp as it's not necessarily updated this frame (if 30fps)
         local prev_btn = __z8_menu.pause_btn
