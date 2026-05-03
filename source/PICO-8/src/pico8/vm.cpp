@@ -1530,21 +1530,24 @@ bool vm::savestate_load(int slot)
     // the same table. Identity preserved, content restored, coroutine
     // call stack survives intact.
     if (!fullstate_blob.empty()) {
+        fprintf(stderr, "[savestate] load slot %d: starting fullstate restore (%zu bytes)\n", slot, fullstate_blob.size());
         int top = lua_gettop(m_lua);
         savestate_build_perms_full(m_lua, /*for_save=*/false);
         int perms_idx = lua_gettop(m_lua);
+        fprintf(stderr, "[savestate] load slot %d: perms built\n", slot);
         lua_pushlstring(m_lua, fullstate_blob.data(), fullstate_blob.size());
         int blob_idx = lua_gettop(m_lua);
         eris_unpersist(m_lua, perms_idx, blob_idx);
+        fprintf(stderr, "[savestate] load slot %d: eris_unpersist returned\n", slot);
         // stack: ..., perms, blob, wrapper_table
 
         if (!lua_istable(m_lua, -1)) {
-            fprintf(stderr, "[savestate] load slot %d: fullstate eris-restored value is not a table\n", slot);
+            fprintf(stderr, "[savestate] load slot %d: fullstate eris-restored value is not a table (got type=%d)\n",
+                    slot, lua_type(m_lua, -1));
             lua_settop(m_lua, top);
         } else {
             int wrapper_idx = lua_gettop(m_lua);
 
-            // Get the eris-restored objects' pointers (for upvalue match).
             lua_getfield(m_lua, wrapper_idx, "sandbox");
             void const* restored_sbox_ptr = lua_istable(m_lua, -1) ? lua_topointer(m_lua, -1) : nullptr;
             lua_pop(m_lua, 1);
@@ -1552,37 +1555,39 @@ bool vm::savestate_load(int slot)
             void const* restored_menu_ptr = lua_istable(m_lua, -1) ? lua_topointer(m_lua, -1) : nullptr;
             lua_pop(m_lua, 1);
 
-            // Push the LIVE sandbox + menu tables (these are our rewrite
-            // targets — every _ENV pointing at restored_sbox_ptr will be
-            // overwritten to point at this live table).
             lua_getglobal(m_lua, "__z8_sandbox");
             int live_sbox_idx = lua_gettop(m_lua);
+            void const* live_sbox_ptr = lua_topointer(m_lua, -1);
             lua_getglobal(m_lua, "__z8_menu");
             int live_menu_idx = lua_gettop(m_lua);
+            void const* live_menu_ptr = lua_topointer(m_lua, -1);
 
             bool live_sbox_ok = lua_istable(m_lua, live_sbox_idx);
             bool live_menu_ok = lua_istable(m_lua, live_menu_idx);
+            fprintf(stderr, "[savestate] load slot %d: pointers — restored_sbox=%p live_sbox=%p restored_menu=%p live_menu=%p (sbox_ok=%d menu_ok=%d)\n",
+                    slot, restored_sbox_ptr, live_sbox_ptr, restored_menu_ptr, live_menu_ptr,
+                    live_sbox_ok, live_menu_ok);
 
-            // Rewrite _ENV upvalues throughout the wrapper graph.
             if (live_sbox_ok && restored_sbox_ptr) {
                 std::unordered_set<void const*> seen;
                 rewrite_env_upvalues_walk(m_lua, wrapper_idx, restored_sbox_ptr, live_sbox_idx, seen, 0);
+                fprintf(stderr, "[savestate] load slot %d: sandbox _ENV rewrite done (%zu objects walked)\n", slot, seen.size());
             }
             if (live_menu_ok && restored_menu_ptr) {
                 std::unordered_set<void const*> seen;
                 rewrite_env_upvalues_walk(m_lua, wrapper_idx, restored_menu_ptr, live_menu_idx, seen, 0);
+                fprintf(stderr, "[savestate] load slot %d: menu _ENV rewrite done (%zu objects walked)\n", slot, seen.size());
             }
 
-            // Replace __z8_loop with the restored coroutine. Its call
-            // frames now have _ENV upvalues pointing at the live sandbox
-            // (rewritten above). BIOS code on the main thread reads
-            // __z8_loop via global lookup — picks up the new value.
             lua_getfield(m_lua, wrapper_idx, "loop");
             bool loop_ok = lua_isthread(m_lua, -1);
+            void const* restored_loop_ptr = loop_ok ? lua_topointer(m_lua, -1) : nullptr;
             if (loop_ok) {
                 lua_setglobal(m_lua, "__z8_loop");
+                fprintf(stderr, "[savestate] load slot %d: __z8_loop replaced with restored thread ptr=%p\n", slot, restored_loop_ptr);
             } else {
                 lua_pop(m_lua, 1);
+                fprintf(stderr, "[savestate] load slot %d: wrapper.loop is not a thread (type=%d)\n", slot, lua_type(m_lua, -1));
             }
 
             // In-place mutate live __z8_sandbox to have restored content.

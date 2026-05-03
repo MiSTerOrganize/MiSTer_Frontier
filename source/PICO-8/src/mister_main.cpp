@@ -315,6 +315,13 @@ static void print_usage(const char *prog)
 
 int main(int argc, char **argv)
 {
+    // Line-buffer stderr so log output is flushed on every newline. Without
+    // this, stderr (redirected to /media/fat/logs/PICO-8/pico8.log by the
+    // daemon) is block-buffered (~4 KB) — diagnostic output from
+    // savestate_save / savestate_load can stay buffered until process exit
+    // or crash, making it impossible to debug crashes mid-restore.
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     // ── Parse arguments ───────────────────────────────────────────────
     std::string cart_path;
     std::string data_dir;
