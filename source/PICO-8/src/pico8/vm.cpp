@@ -1475,8 +1475,40 @@ bool vm::savestate_load(int slot)
                 lua_State* T = lua_tothread(m_lua, -1);
                 lua_getglobal(m_lua, "__z8_sandbox");
                 void const* sandbox_ptr = lua_topointer(m_lua, -1);
-                fprintf(stderr, "[savestate-diag] load: __z8_sandbox table ptr=%p\n", sandbox_ptr);
                 lua_pop(m_lua, 1);
+
+                lua_pushglobaltable(m_lua);
+                void const* G_ptr = lua_topointer(m_lua, -1);
+                lua_pop(m_lua, 1);
+
+                fprintf(stderr, "[savestate-diag] load: __z8_sandbox ptr=%p  live _G ptr=%p\n",
+                        sandbox_ptr, G_ptr);
+
+                // Probe restored sandbox: is its _draw/_update60/_init the
+                // same Lua function object as the cart's expectation? Check
+                // the _ENV upvalues of those cart functions specifically.
+                lua_getglobal(m_lua, "__z8_sandbox");
+                int sb = lua_gettop(m_lua);
+                for (auto fn_name : {"_init", "_update60", "_update", "_draw"}) {
+                    lua_getfield(m_lua, sb, fn_name);
+                    if (lua_isfunction(m_lua, -1) && !lua_iscfunction(m_lua, -1)) {
+                        // walk upvalues of this function
+                        for (int up = 1; up <= 256; ++up) {
+                            const char* upname = lua_getupvalue(m_lua, -1, up);
+                            if (!upname) break;
+                            if (strcmp(upname, "_ENV") == 0) {
+                                void const* env_ptr = lua_topointer(m_lua, -1);
+                                fprintf(stderr, "[savestate-diag] load: sandbox.%s _ENV ptr=%p (sandbox=%s, G=%s)\n",
+                                        fn_name, env_ptr,
+                                        env_ptr == sandbox_ptr ? "YES" : "no",
+                                        env_ptr == G_ptr ? "YES" : "no");
+                            }
+                            lua_pop(m_lua, 1);
+                        }
+                    }
+                    lua_pop(m_lua, 1);
+                }
+                lua_pop(m_lua, 1);  // pop sandbox
 
                 // Walk each call frame in T using lua_Debug
                 lua_Debug ar;
@@ -1491,13 +1523,14 @@ bool vm::savestate_load(int slot)
                         if (strcmp(upname, "_ENV") == 0) {
                             void const* env_ptr = lua_topointer(T, -1);
                             int env_type = lua_type(T, -1);
-                            fprintf(stderr, "[savestate-diag] load: thread frame %d (%s '%s') _ENV upvalue ptr=%p type=%d match_sandbox=%s\n",
+                            fprintf(stderr, "[savestate-diag] load: thread frame %d (%s '%s') _ENV ptr=%p type=%d sandbox=%s G=%s\n",
                                     level,
                                     ar.what ? ar.what : "?",
                                     ar.name ? ar.name : "(anon)",
                                     env_ptr,
                                     env_type,
-                                    env_ptr == sandbox_ptr ? "YES" : "NO");
+                                    env_ptr == sandbox_ptr ? "YES" : "no",
+                                    env_ptr == G_ptr ? "YES" : "no");
                             env_idx = up;
                         }
                         lua_pop(T, 1);
