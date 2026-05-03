@@ -1451,6 +1451,50 @@ bool vm::savestate_load(int slot)
                 lua_pop(m_lua, 1);
             }
 
+            // DIAG: walk the restored thread's call stack and inspect _ENV
+            // of every Lua function. Compare each _ENV pointer to the
+            // sandbox we just setglobal'd. If they differ, eris isn't
+            // preserving _ENV upvalue identity with our wrapper.sandbox.
+            lua_getglobal(m_lua, "__z8_loop");
+            if (lua_isthread(m_lua, -1)) {
+                lua_State* T = lua_tothread(m_lua, -1);
+                lua_getglobal(m_lua, "__z8_sandbox");
+                void const* sandbox_ptr = lua_topointer(m_lua, -1);
+                fprintf(stderr, "[savestate-diag] load: __z8_sandbox table ptr=%p\n", sandbox_ptr);
+                lua_pop(m_lua, 1);
+
+                // Walk each call frame in T using lua_Debug
+                lua_Debug ar;
+                int level = 0;
+                while (lua_getstack(T, level, &ar)) {
+                    lua_getinfo(T, "fnSl", &ar);
+                    // ar.func is now on T's stack — get its _ENV upvalue (typically index 1)
+                    int env_idx = -1;
+                    for (int up = 1; up <= 256; ++up) {
+                        const char* upname = lua_getupvalue(T, -1, up);
+                        if (!upname) break;
+                        if (strcmp(upname, "_ENV") == 0) {
+                            void const* env_ptr = lua_topointer(T, -1);
+                            int env_type = lua_type(T, -1);
+                            fprintf(stderr, "[savestate-diag] load: thread frame %d (%s '%s') _ENV upvalue ptr=%p type=%d match_sandbox=%s\n",
+                                    level,
+                                    ar.what ? ar.what : "?",
+                                    ar.name ? ar.name : "(anon)",
+                                    env_ptr,
+                                    env_type,
+                                    env_ptr == sandbox_ptr ? "YES" : "NO");
+                            env_idx = up;
+                        }
+                        lua_pop(T, 1);
+                        if (env_idx >= 0) break;
+                    }
+                    lua_pop(T, 1);  // pop ar.func
+                    ++level;
+                    if (level > 10) break;  // cap
+                }
+            }
+            lua_pop(m_lua, 1);  // pop __z8_loop
+
             lua_settop(m_lua, top);
             fprintf(stderr, "[savestate] load slot %d: full Lua state restored (%zu bytes, %d/3 globals replaced)\n",
                     slot, fullstate_blob.size(), restored_count);
