@@ -1088,6 +1088,21 @@ bool vm::savestate_save(int slot)
 
         lua_getglobal(m_lua, "__z8_loop");
         if (lua_isthread(m_lua, -1)) {
+            // DIAG: log thread status and stack depth at save time so we can
+            // verify what we're actually persisting.
+            lua_State* loopT = lua_tothread(m_lua, -1);
+            int loop_status = lua_status(loopT);
+            int loop_top = lua_gettop(loopT);
+            const char* status_str =
+                loop_status == 0           ? "OK/RESUMABLE" :
+                loop_status == LUA_YIELD   ? "YIELD/SUSPENDED" :
+                loop_status == LUA_ERRRUN  ? "ERRRUN" :
+                loop_status == LUA_ERRSYNTAX ? "ERRSYNTAX" :
+                loop_status == LUA_ERRMEM  ? "ERRMEM" :
+                loop_status == LUA_ERRGCMM ? "ERRGCMM" :
+                loop_status == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
+            fprintf(stderr, "[savestate-diag] save: __z8_loop status=%d (%s) stack_top=%d\n",
+                    loop_status, status_str, loop_top);
             lua_setfield(m_lua, wrapper_idx, "loop");
         } else {
             lua_pop(m_lua, 1);
@@ -1390,7 +1405,33 @@ bool vm::savestate_load(int slot)
 
             lua_getfield(m_lua, wrapper_idx, "loop");
             if (lua_isthread(m_lua, -1)) {
+                // DIAG: log restored thread state before setglobal
+                lua_State* restoredT = lua_tothread(m_lua, -1);
+                int rs = lua_status(restoredT);
+                int rtop = lua_gettop(restoredT);
+                const char* rs_str =
+                    rs == 0           ? "OK/RESUMABLE" :
+                    rs == LUA_YIELD   ? "YIELD/SUSPENDED" :
+                    rs == LUA_ERRRUN  ? "ERRRUN" :
+                    rs == LUA_ERRSYNTAX ? "ERRSYNTAX" :
+                    rs == LUA_ERRMEM  ? "ERRMEM" :
+                    rs == LUA_ERRGCMM ? "ERRGCMM" :
+                    rs == LUA_ERRERR  ? "ERRERR" : "UNKNOWN";
+                fprintf(stderr, "[savestate-diag] load: restored thread status=%d (%s) stack_top=%d ptr=%p\n",
+                        rs, rs_str, rtop, (void*)restoredT);
                 lua_setglobal(m_lua, "__z8_loop");
+
+                // DIAG: re-fetch __z8_loop to verify setglobal worked
+                lua_getglobal(m_lua, "__z8_loop");
+                if (lua_isthread(m_lua, -1)) {
+                    lua_State* refetchT = lua_tothread(m_lua, -1);
+                    int rs2 = lua_status(refetchT);
+                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop status=%d ptr=%p (match=%s)\n",
+                            rs2, (void*)refetchT, refetchT == restoredT ? "yes" : "NO");
+                } else {
+                    fprintf(stderr, "[savestate-diag] load: re-fetched __z8_loop is NOT a thread!\n");
+                }
+                lua_pop(m_lua, 1);
                 ++restored_count;
             } else {
                 lua_pop(m_lua, 1);
@@ -1413,6 +1454,11 @@ bool vm::savestate_load(int slot)
             lua_settop(m_lua, top);
             fprintf(stderr, "[savestate] load slot %d: full Lua state restored (%zu bytes, %d/3 globals replaced)\n",
                     slot, fullstate_blob.size(), restored_count);
+
+            // DIAG: tell BIOS to log __z8_loop status for the next 5 ticks
+            // so we can see if the restored coroutine is actually being resumed.
+            lua_pushinteger(m_lua, 5);
+            lua_setglobal(m_lua, "__z8_diag_remaining");
         }
     }
 
