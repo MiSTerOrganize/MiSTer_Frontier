@@ -891,7 +891,10 @@ bool vm::save_cartdata(bool force)
 
 static constexpr char SAVESTATE_MAGIC[4] = {'Z','S','0','1'};
 static constexpr uint32_t SAVESTATE_VERSION_MIN = 1;
-static constexpr uint32_t SAVESTATE_VERSION = 2;
+// v1: ram only.
+// v2: + cart filename + Lua sandbox via eris.
+// v3: + m_state (audio sequencer / draw / input mirror) + __z8_menu via eris.
+static constexpr uint32_t SAVESTATE_VERSION = 3;
 
 // eris perms-table builder. eris uses a "permanent" table to map values
 // (functions, userdata) that should be stored as references rather than
@@ -994,10 +997,41 @@ bool vm::savestate_save(int slot)
     fwrite(&lua_blob_len, 4, 1, f);
     if (lua_blob_len) fwrite(lua_blob.data(), 1, lua_blob_len, f);
 
+    // v3: m_state — audio sequencer / draw / input mirror. Pure POD by design
+    // (struct docstring in vm.h: "everything that does not reside in PICO-8
+    // memory or in Lua memory but that we want to serialise for snapshots").
+    uint32_t state_size = (uint32_t)sizeof(state);
+    fwrite(&state_size, 4, 1, f);
+    fwrite(&m_state, 1, sizeof(state), f);
+
+    // v3: __z8_menu — pause-menu state including cart-defined menu items.
+    // Lives as a BIOS global, persisted with the same perms table as the
+    // sandbox (eris handles cart-defined Lua callbacks via bytecode).
+    std::string menu_blob;
+    {
+        int top2 = lua_gettop(m_lua);
+        lua_getglobal(m_lua, "__z8_menu");
+        if (lua_istable(m_lua, -1)) {
+            int menu_idx = lua_gettop(m_lua);
+            savestate_build_perms(m_lua, /*for_save=*/true);
+            int perms_idx = lua_gettop(m_lua);
+            eris_persist(m_lua, perms_idx, menu_idx);
+            size_t blob_len = 0;
+            const char* blob_data = lua_tolstring(m_lua, -1, &blob_len);
+            if (blob_data && blob_len > 0) {
+                menu_blob.assign(blob_data, blob_len);
+            }
+        }
+        lua_settop(m_lua, top2);
+    }
+    uint32_t menu_blob_len = (uint32_t)menu_blob.size();
+    fwrite(&menu_blob_len, 4, 1, f);
+    if (menu_blob_len) fwrite(menu_blob.data(), 1, menu_blob_len, f);
+
     long pos = ftell(f);
     fclose(f);
-    fprintf(stderr, "[savestate] saved slot %d: %ld bytes (ram=%u, cart_path=%u, lua=%u) -> %s\n",
-            slot, pos, ram_size, cart_path_len, lua_blob_len, path.c_str());
+    fprintf(stderr, "[savestate] saved slot %d: %ld bytes (ram=%u, cart_path=%u, lua=%u, state=%u, menu=%u) -> %s\n",
+            slot, pos, ram_size, cart_path_len, lua_blob_len, state_size, menu_blob_len, path.c_str());
     return true;
 }
 
@@ -1080,6 +1114,43 @@ bool vm::savestate_load(int slot)
             }
         }
     }
+
+    // V3+ sections: m_state + __z8_menu blob
+    bool have_state = false;
+    state staged_state;  // zero-initialized via default constructor
+    std::string menu_blob;
+    if (version >= 3) {
+        uint32_t state_size = 0;
+        if (fread(&state_size, 4, 1, f) != 1) {
+            fprintf(stderr, "[savestate] load slot %d: short read of state_size\n", slot);
+            fclose(f); return false;
+        }
+        if (state_size != sizeof(state)) {
+            fprintf(stderr, "[savestate] load slot %d: state size mismatch (file=%u, expected=%zu) — skipping state restore\n",
+                    slot, state_size, sizeof(state));
+            // Still consume the bytes so we don't desync the file pointer
+            std::string skip(state_size, '\0');
+            fread(&skip[0], 1, state_size, f);
+        } else {
+            if (fread(&staged_state, 1, sizeof(state), f) != sizeof(state)) {
+                fprintf(stderr, "[savestate] load slot %d: short read of state\n", slot);
+                fclose(f); return false;
+            }
+            have_state = true;
+        }
+        uint32_t menu_blob_len = 0;
+        if (fread(&menu_blob_len, 4, 1, f) != 1) {
+            fprintf(stderr, "[savestate] load slot %d: short read of menu_blob_len\n", slot);
+            fclose(f); return false;
+        }
+        if (menu_blob_len) {
+            menu_blob.resize(menu_blob_len);
+            if (fread(&menu_blob[0], 1, menu_blob_len, f) != menu_blob_len) {
+                fprintf(stderr, "[savestate] load slot %d: short read of menu_blob\n", slot);
+                fclose(f); return false;
+            }
+        }
+    }
     fclose(f);
 
     // Multicart: if the saved cart differs from the currently active cart,
@@ -1150,6 +1221,33 @@ bool vm::savestate_load(int slot)
             lua_settop(m_lua, top);
             fprintf(stderr, "[savestate] load slot %d: Lua state restored (%zu bytes)\n", slot, lua_blob.size());
         }
+    }
+
+    // V3: apply m_state. Brief audio click is possible if the audio thread
+    // is mid-read of channels[].reverb_2/4 during this memcpy — acceptable
+    // (~1 frame). State was captured at a coherent point on save.
+    if (have_state) {
+        memcpy(&m_state, &staged_state, sizeof(state));
+    }
+
+    // V3: restore __z8_menu via eris. Replace the global rather than mutate
+    // in place — bios.p8 always accesses __z8_menu via global lookup, never
+    // via captured local, so a setglobal works correctly.
+    if (!menu_blob.empty()) {
+        int top = lua_gettop(m_lua);
+        savestate_build_perms(m_lua, /*for_save=*/false);
+        int perms_idx = lua_gettop(m_lua);
+        lua_pushlstring(m_lua, menu_blob.data(), menu_blob.size());
+        int blob_idx = lua_gettop(m_lua);
+        eris_unpersist(m_lua, perms_idx, blob_idx);
+        // stack: ..., perms, blob, restored_value
+        if (lua_istable(m_lua, -1)) {
+            lua_setglobal(m_lua, "__z8_menu");
+            fprintf(stderr, "[savestate] load slot %d: __z8_menu restored (%zu bytes)\n", slot, menu_blob.size());
+        } else {
+            fprintf(stderr, "[savestate] load slot %d: menu eris-restored value is not a table — skipping\n", slot);
+        }
+        lua_settop(m_lua, top);
     }
 
     fprintf(stderr, "[savestate] loaded slot %d from %s\n", slot, path.c_str());
