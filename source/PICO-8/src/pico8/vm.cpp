@@ -1000,16 +1000,31 @@ static void savestate_build_perms_full(lua_State* L, bool for_save)
 
     std::unordered_set<void const*> seen;
 
-    // Walk the global table _G recursively.
+    // CRITICAL: register _G itself as a permanent value before walking it.
+    // Without this, eris encounters _G via the cart coroutine's BIOS-side
+    // call frames (flip, the cocreate wrapper, etc., which all have _ENV=_G)
+    // and serializes a *copy* of the entire BIOS environment. After load
+    // those frames run against the dead copy, not the live _G. Result: cart
+    // appears to run but has no connection to the live engine state.
+    // Diagnosed via v4.2 _ENV upvalue walk: BIOS frames had _ENV pointing
+    // at a different table than the live _G.
     lua_pushglobaltable(L);
+    if (for_save) {
+        lua_pushvalue(L, -1);                     // duplicate _G
+        lua_pushstring(L, "_G");                  // key = "_G"
+        lua_settable(L, perms_idx);               // perms[_G_table] = "_G"
+    } else {
+        lua_pushvalue(L, -1);                     // duplicate _G
+        lua_setfield(L, perms_idx, "_G");         // perms["_G"] = _G_table
+    }
     seen.insert(lua_topointer(L, -1));
+
+    // Now walk _G recursively to register every C function and library
+    // table by name path. C functions MUST be in perms (eris can't
+    // serialize C closures); library tables benefit from identity
+    // preservation across save/load (string == string, etc.).
     perms_walk(L, perms_idx, lua_gettop(L), "", for_save, seen);
     lua_pop(L, 1);
-
-    // Skip walking LUA_REGISTRYINDEX directly — it contains transient stuff
-    // like loaded modules cache, weak tables for upvalue dedup, etc., which
-    // varies between processes. The cart can only reach C functions via _G,
-    // so walking _G is sufficient for our needs.
 }
 
 
