@@ -3,22 +3,29 @@
 # Unified OpenBOR handler — invoked by Master_Daemon when EITHER the
 # OpenBOR_4086 or OpenBOR_7533 RBF loads (both share setname "OpenBOR").
 #
-# Dispatch via /tmp/RBFNAME — MiSTer writes the loaded RBF's filename
-# there, separate from CORENAME. We case-match the filename to pick
-# which build's binary to exec.
-#
-# Master_Daemon owns the lifecycle. This handler picks the engine
-# variant, sets up SDL env (different per build), archives the previous
-# OpenBOR engine log, and execs the binary.
+# Dispatch by reading MiSTer Main's argv[1] (the RBF path) from
+# /proc/$pid/cmdline. /tmp/RBFNAME and /tmp/CORENAME both contain the
+# setname (not the RBF filename) so they cannot distinguish 4086 from 7533.
+# Master_Daemon owns the lifecycle.
 
 GAMEDIR="/media/fat/games/OpenBOR"
 LOGDIR="/media/fat/logs/OpenBOR"
 
 cd "$GAMEDIR" || exit 1
 
-# Detect which RBF was loaded → which binary to exec.
-RBF=$(cat /tmp/RBFNAME 2>/dev/null)
-case "$RBF" in
+# Read MiSTer Main's argv to find the loaded RBF filename.
+# `pidof MiSTer` may return multiple PIDs (older lingering shells); take
+# the one whose argv contains an .rbf path.
+MISTER_RBF=""
+for pid in $(pidof MiSTer 2>/dev/null); do
+    cand=$(tr '\0' '\n' < "/proc/$pid/cmdline" 2>/dev/null | grep -E '\.rbf$' | head -1)
+    if [ -n "$cand" ]; then
+        MISTER_RBF="$cand"
+        break
+    fi
+done
+
+case "$MISTER_RBF" in
     *4086*)
         BUILD=4086
         BINARY="OpenBOR_4086"
@@ -28,7 +35,7 @@ case "$RBF" in
         BINARY="OpenBOR_7533"
         ;;
     *)
-        echo "OpenBOR handler: unrecognized RBF '$RBF' — defaulting to 7533" >&2
+        echo "OpenBOR handler: unrecognized RBF '$MISTER_RBF' — defaulting to 7533" >&2
         BUILD=7533
         BINARY="OpenBOR_7533"
         ;;
@@ -66,5 +73,5 @@ fi
 # FPGA settle on first launch
 sleep 1
 
-echo "OpenBOR handler: dispatching to $BINARY (RBF=$RBF)" > "$LOGDIR/OpenBOR.log"
+echo "OpenBOR handler: dispatching to $BINARY (RBF=$MISTER_RBF)" > "$LOGDIR/OpenBOR.log"
 exec ./"$BINARY" >> "$LOGDIR/OpenBOR.log" 2>&1
