@@ -22,7 +22,7 @@ For older PAKs that depend on legacy 3979/4086-era scripting quirks, see the sis
 
 1. Copy `Scripts/Install_OpenBOR.sh` to `/media/fat/Scripts/` on your MiSTer SD card
 2. From the MiSTer main menu, go to Scripts and run **Install_OpenBOR**
-3. Place your `.pak` game modules in `games/OpenBOR_7533/Paks/`
+3. Place your `.pak` game modules in `games/OpenBOR/Paks/` (shared with the OpenBOR_4086 build — both can read the same library)
 4. Load **OpenBOR_7533** from the console menu to play
 
 The install script downloads and installs everything: the FPGA core, ARM binary, daemon, and documentation.
@@ -34,26 +34,28 @@ Extract the release zip to the root of your MiSTer SD card (`/media/fat/`):
 ```
 /media/fat/
 ├── _Other/
-│   └── OpenBOR_7533_YYYYMMDD.rbf          FPGA core (dated build)
+│   ├── OpenBOR_4086_YYYYMMDD.rbf          FPGA core (4086 build, dated)
+│   └── OpenBOR_7533_YYYYMMDD.rbf          FPGA core (7533 build, dated)
 ├── docs/
 │   └── OpenBOR_7533/
 │       └── README.md                       Documentation
 ├── games/
-│   └── OpenBOR_7533/
-│       ├── OpenBOR                         ARM binary (engine)
-│       ├── openbor_7533_daemon.sh          Auto-launch daemon
+│   └── OpenBOR/                            Shared folder for BOTH builds
+│       ├── OpenBOR_4086                    ARM binary (4086 engine)
+│       ├── OpenBOR_7533                    ARM binary (7533 engine)
+│       ├── _handler.sh                     Master_Daemon dispatcher
 │       └── Paks/                           Place your .pak game modules here
 ├── logs/
-│   └── OpenBOR_7533/                       Debug logs
+│   └── OpenBOR/                            Debug logs (shared by both builds)
 ├── saves/
-│   └── OpenBOR_7533/                       Game saves (created automatically)
+│   └── OpenBOR/                            Game saves (created automatically)
 └── Scripts/
     └── Install_OpenBOR.sh                  Install script
 ```
 
 ## Game Modules (PAK Files)
 
-Place your OpenBOR PAK files in `/media/fat/games/OpenBOR_7533/Paks/`.
+Place your OpenBOR PAK files in `/media/fat/games/OpenBOR/Paks/`. Both the 4086 and 7533 builds read from this shared folder — when you pick "Load PAK" from either core's OSD, you see the same library, and you can re-try a PAK in the other build by reloading its RBF without moving files.
 
 The PAK format is fully backward compatible — PAKs from 4086 and earlier collections continue to work. Modern PAKs that need post-4086 script commands (Build 6000+ era) require this build.
 

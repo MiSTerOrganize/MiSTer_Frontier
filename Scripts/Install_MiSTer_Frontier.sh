@@ -62,6 +62,33 @@ killall openbor_4086_daemon.sh 2>/dev/null
 killall openbor_7533_daemon.sh 2>/dev/null
 killall music_player_daemon.sh 2>/dev/null
 
+# 4b) Migrate from pre-unification OpenBOR layout (May 2026):
+# Both OpenBOR builds now share games/OpenBOR/ folder. Move user PAKs
+# from the legacy per-build folders, then remove the old folder skeleton.
+if [ -d /media/fat/games/OpenBOR_4086 ] || [ -d /media/fat/games/OpenBOR_7533 ]; then
+    mkdir -p /media/fat/games/OpenBOR/Paks
+    for old in /media/fat/games/OpenBOR_4086 /media/fat/games/OpenBOR_7533; do
+        [ -d "$old/Paks" ] || continue
+        # Move PAK files (deduplicated by name — won't clobber existing target)
+        find "$old/Paks" -maxdepth 1 -type f -name '*.pak' -print0 \
+            | while IFS= read -r -d '' f; do
+                base=$(basename "$f")
+                if [ ! -e "/media/fat/games/OpenBOR/Paks/$base" ]; then
+                    mv -f "$f" "/media/fat/games/OpenBOR/Paks/" 2>/dev/null
+                fi
+            done
+        # Move any sub-folders of Paks/ (custom organization)
+        find "$old/Paks" -maxdepth 1 -mindepth 1 -type d -exec mv -f {} /media/fat/games/OpenBOR/Paks/ \; 2>/dev/null
+    done
+    # Remove obsolete binaries + handlers (handled by update_all manifest now)
+    rm -f /media/fat/games/OpenBOR_4086/OpenBOR /media/fat/games/OpenBOR_4086/_handler.sh 2>/dev/null
+    rm -f /media/fat/games/OpenBOR_7533/OpenBOR /media/fat/games/OpenBOR_7533/_handler.sh 2>/dev/null
+    rm -rf /media/fat/games/OpenBOR_4086/Logs /media/fat/games/OpenBOR_7533/Logs 2>/dev/null
+    rmdir /media/fat/games/OpenBOR_4086/Paks /media/fat/games/OpenBOR_7533/Paks 2>/dev/null
+    rmdir /media/fat/games/OpenBOR_4086 /media/fat/games/OpenBOR_7533 2>/dev/null
+    echo "  ✓ Migrated OpenBOR_4086/7533 layouts → unified games/OpenBOR/"
+fi
+
 # 5) Kill any prior Master_Daemon instance, then start fresh
 ps | grep "Master_Daemon.sh" | grep -v grep | awk '{print $1}' | xargs -r kill 2>/dev/null
 sleep 1
