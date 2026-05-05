@@ -89,6 +89,13 @@ if [ -d /media/fat/games/OpenBOR_4086 ] || [ -d /media/fat/games/OpenBOR_7533 ];
     echo "  ✓ Migrated OpenBOR_4086/7533 layouts → unified games/OpenBOR/"
 fi
 
+# 4c) Migrate from pre-unification OpenBOR docs layout: per-build README
+# folders are replaced by a single docs/OpenBOR/README.md.
+if [ -d /media/fat/docs/OpenBOR_4086 ] || [ -d /media/fat/docs/OpenBOR_7533 ]; then
+    rm -rf /media/fat/docs/OpenBOR_4086 /media/fat/docs/OpenBOR_7533 2>/dev/null
+    echo "  ✓ Removed legacy per-build docs/OpenBOR_*/ folders (single docs/OpenBOR/ now)"
+fi
+
 # 5) Kill any prior Master_Daemon instance, then start fresh
 ps | grep "Master_Daemon.sh" | grep -v grep | awk '{print $1}' | xargs -r kill 2>/dev/null
 sleep 1
