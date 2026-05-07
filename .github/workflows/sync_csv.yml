@@ -1,0 +1,41 @@
+name: Sync external_files.csv from per-core repos
+
+on:
+  schedule:
+    # Every 6 hours. RBF date-rolls only happen when the developer
+    # manually rebuilds in Quartus and pushes — infrequent. 6h polling
+    # is plenty.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+  # Trigger on pushes to per-core repos via repository_dispatch — see
+  # the Trigger section of any per-core build.yml. The dispatch type
+  # is `per-core-rbf-update`.
+  repository_dispatch:
+    types: [per-core-rbf-update]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sync CSV from per-core repos
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 .github/scripts/sync_external_csv.py
+
+      - name: Commit + push if CSV changed
+        run: |
+          if ! git diff --quiet external_files.csv; then
+            git config user.email "ci@misterorganize"
+            git config user.name "MiSTer Organize CI"
+            git add external_files.csv
+            git commit -m "CI: sync external_files.csv from per-core repo RBF dates"
+            git push
+            echo "CSV synced. The push will trigger build_db.yml to rebuild db.json.zip."
+          else
+            echo "CSV already in sync — no commit needed."
+          fi
