@@ -1,4 +1,8 @@
 Path in MiSTer, URL, Size in bytes (optional but recommended), MD5 Hash (optional but recommended), Filter Terms (optional)
+MiSTer_Frontier/Master_Daemon.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Frontier/main/MiSTer_Frontier/Master_Daemon.sh,,,pico-8 openbor-4086 openbor-7533
+Scripts/Install_MiSTer_Frontier.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Frontier/main/Scripts/Install_MiSTer_Frontier.sh,,,pico-8 openbor-4086 openbor-7533
+games/OpenBOR/_handler.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Frontier/main/games/OpenBOR/_handler.sh,,,openbor-4086 openbor-7533
+docs/OpenBOR/README.md,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Frontier/main/docs/OpenBOR/README.md,,,openbor-4086 openbor-7533
 _Other/PICO-8_20260502.rbf,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/_Other/PICO-8_20260502.rbf,,,pico-8
 games/PICO-8/PICO-8,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/games/PICO-8/PICO-8,,,pico-8
 games/PICO-8/bios.p8,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/games/PICO-8/bios.p8,,,pico-8
