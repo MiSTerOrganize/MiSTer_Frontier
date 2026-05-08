@@ -5,6 +5,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  schedule:
+    # Daily DB rebuild — picks up new per-core binary hashes when their
+    # CI rebuilt the ARM binary without changing the URL (filenames are
+    # only dated for RBFs; binary names like games/PICO-8/PICO-8 don't
+    # have dates). Without this, db.json hashes stay stale after a per-
+    # core binary rebuild until something else triggers a push to main.
+    - cron: '17 4 * * *'
 
 permissions: write-all
 
