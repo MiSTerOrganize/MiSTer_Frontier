@@ -89,6 +89,14 @@ if [ -d /media/fat/games/OpenBOR_4086 ] || [ -d /media/fat/games/OpenBOR_7533 ];
     echo "  ✓ Migrated OpenBOR_4086/7533 layouts → unified games/OpenBOR/"
 fi
 
+# 4b) Migrate from v2.2-and-earlier log layouts:
+#   - games/OpenBOR/Logs/        — engine wrote here via "./Logs/..." relative paths before v2.3
+#   - logs/OpenBOR/              — handler used unified LOGDIR=/media/fat/logs/OpenBOR briefly
+# v2.3 fix: engine + handler both write per-build to logs/OpenBOR_4086/ or logs/OpenBOR_7533/.
+# Clean up the stale dirs so audits + tail-F workflows aren't confused by ghost content.
+rm -rf /media/fat/games/OpenBOR/Logs 2>/dev/null
+rm -rf /media/fat/logs/OpenBOR 2>/dev/null
+
 # 4c) Migrate from pre-unification OpenBOR docs layout: per-build README
 # folders are replaced by a single docs/OpenBOR/README.md.
 if [ -d /media/fat/docs/OpenBOR_4086 ] || [ -d /media/fat/docs/OpenBOR_7533 ]; then
