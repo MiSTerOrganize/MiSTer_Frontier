@@ -130,32 +130,51 @@ for HANDLER_DIR in "$GAMES_ROOT"/*/_handler.sh; do
     fi
 done
 
+LAST_RBF=""
 while true; do
     CUR=$(cat /tmp/CORENAME 2>/dev/null)
+    # Also track the loaded RBF path (MiSTer Main's argv[1]) — sister-core
+    # forks (e.g. OpenBOR_4086 + OpenBOR_7533) share the same CONF_STR
+    # setname so CORENAME doesn't change when switching between them.
+    # Without RBF tracking, swapping 4086 ↔ 7533 leaves the previous
+    # binary running with the previous PAK auto-mounted via .s0.
+    MISTER_PID=$(pidof MiSTer 2>/dev/null | awk '{print $1}')
+    CUR_RBF=""
+    if [ -n "$MISTER_PID" ] && [ -r "/proc/$MISTER_PID/cmdline" ]; then
+        # cmdline is NUL-separated; argv[1] is the loaded RBF path
+        CUR_RBF=$(tr '\0' '\n' < "/proc/$MISTER_PID/cmdline" 2>/dev/null | sed -n 2p)
+    fi
 
-    # Core changed?
-    if [ "$CUR" != "$LAST" ]; then
+    # Core changed OR (same core but RBF changed — sister-core swap)?
+    if [ "$CUR" != "$LAST" ] || { [ -n "$CUR_RBF" ] && [ -n "$LAST_RBF" ] && [ "$CUR_RBF" != "$LAST_RBF" ]; }; then
         # Kill the previous core's child cleanly
         if [ -n "$CHILD" ]; then
-            log "Core changed: '$LAST' -> '$CUR', killing CHILD PID $CHILD"
+            if [ "$CUR" != "$LAST" ]; then
+                log "Core changed: '$LAST' -> '$CUR', killing CHILD PID $CHILD"
+            else
+                log "Sister-core RBF swap within '$CUR': '$LAST_RBF' -> '$CUR_RBF', killing CHILD PID $CHILD"
+            fi
             kill_child
         fi
 
-        # When leaving a hybrid core, delete its .s0 so re-entry goes
-        # through MiSTer's OSD picker instead of auto-mounting the
-        # previous PAK/cart. .cfg files (OSD video settings) are kept.
-        if [ -n "$LAST" ] && [ -f "$CONFIG_ROOT/$LAST.s0" ]; then
-            rm -f "$CONFIG_ROOT/$LAST.s0"
+        # Delete .s0 so re-entry/swap goes through OSD picker instead of
+        # auto-mounting the previous PAK/cart. Use LAST for cross-core
+        # transitions, CUR for sister-core RBF swap (same setname).
+        STALE_CORE="${LAST:-$CUR}"
+        if [ -n "$STALE_CORE" ] && [ -f "$CONFIG_ROOT/$STALE_CORE.s0" ]; then
+            log "Cleared stale .s0 for '$STALE_CORE' (PAK/cart picker on re-entry)"
+            rm -f "$CONFIG_ROOT/$STALE_CORE.s0"
         fi
 
         # Spawn the handler for the new core, if it's a hybrid core
         HANDLER="$GAMES_ROOT/$CUR/_handler.sh"
         if [ -n "$CUR" ] && [ -x "$HANDLER" ]; then
-            log "Spawning handler for '$CUR'"
+            log "Spawning handler for '$CUR' (RBF=$CUR_RBF)"
             "$HANDLER" &
             CHILD=$!
         fi
         LAST="$CUR"
+        LAST_RBF="$CUR_RBF"
     fi
 
     # Detect child exit (engine called exit(0), Reset Pak, crash, etc.)
