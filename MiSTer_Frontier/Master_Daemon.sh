@@ -114,6 +114,22 @@ LAST=""
 CHILD=""
 log "Master_Daemon started (PID $$)"
 
+# Clear any stale .s0 files for every hybrid core at startup. Master_Daemon
+# normally clears .s0 on core transition (leaving a hybrid core), but cannot
+# clear on POWER OFF — so a previous session's .s0 survives reboot and the
+# next launch of that core auto-mounts the stale path instead of waiting
+# for OSD pick. Cleanup here ensures fresh-boot behavior matches in-session
+# behavior: every hybrid-core entry waits for OSD pick (or MGL write, which
+# happens after this point so isn't affected).
+for HANDLER_DIR in "$GAMES_ROOT"/*/_handler.sh; do
+    [ -f "$HANDLER_DIR" ] || continue
+    CORE_NAME=$(basename "$(dirname "$HANDLER_DIR")")
+    if [ -f "$CONFIG_ROOT/$CORE_NAME.s0" ]; then
+        log "Cleared stale boot-time .s0 for hybrid core '$CORE_NAME'"
+        rm -f "$CONFIG_ROOT/$CORE_NAME.s0"
+    fi
+done
+
 while true; do
     CUR=$(cat /tmp/CORENAME 2>/dev/null)
 
