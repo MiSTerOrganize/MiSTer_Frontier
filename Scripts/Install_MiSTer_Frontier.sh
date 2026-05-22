@@ -18,6 +18,7 @@
 
 MASTER="/media/fat/MiSTer_Frontier/Master_Daemon.sh"
 STARTUP="/media/fat/linux/user-startup.sh"
+STARTUP_UNDERSCORE="/media/fat/linux/_user-startup.sh"
 
 echo "=== MiSTer Frontier — One-time setup ==="
 echo
@@ -35,25 +36,54 @@ fi
 chmod +x "$MASTER"
 echo "  ✓ $MASTER is executable"
 
-# 2) Strip obsolete per-core daemon registrations
+# 2a) Resolve which startup file MiSTer Main actually reads at boot.
+# MiSTer's convention: linux/user-startup.sh (no underscore) is executed.
+# linux/_user-startup.sh (with underscore) is a deactivated/template state.
+# If the user has ONLY the underscore variant, our install previously
+# became a silent no-op — meaning Master_Daemon wouldn't auto-start on
+# reboot. Fix: detect the case, prefer the active file, create it if
+# neither exists. Reported by community user 2026-05-22.
 if [ -f "$STARTUP" ]; then
-    sed -i '/pico8_daemon\.sh/d'         "$STARTUP"
-    sed -i '/openbor_4086_daemon\.sh/d'  "$STARTUP"
-    sed -i '/openbor_7533_daemon\.sh/d'  "$STARTUP"
-    sed -i '/music_player_daemon\.sh/d'  "$STARTUP"
-    sed -i '/PICO-8 auto-launch daemon/d' "$STARTUP"
-    sed -i '/OpenBOR auto-launch daemon/d' "$STARTUP"
-    echo "  ✓ Cleared obsolete per-core daemon registrations"
+    ACTIVE_STARTUP="$STARTUP"
+    echo "  ✓ Using existing $STARTUP"
+elif [ -f "$STARTUP_UNDERSCORE" ]; then
+    # User has only the underscore variant — promote it by writing to
+    # the no-underscore name (which is what MiSTer Main actually reads).
+    # Preserve their existing content by copying first.
+    cp -f "$STARTUP_UNDERSCORE" "$STARTUP"
+    chmod +x "$STARTUP"
+    ACTIVE_STARTUP="$STARTUP"
+    echo "  ✓ Promoted $STARTUP_UNDERSCORE → $STARTUP (MiSTer Main reads"
+    echo "    the no-underscore version at boot; the underscore variant"
+    echo "    is a deactivated template that wouldn't run)"
+else
+    # Neither variant exists — create the active one fresh.
+    cat > "$STARTUP" <<'EOF'
+#!/bin/sh
+# MiSTer user startup script — runs at every boot.
+EOF
+    chmod +x "$STARTUP"
+    ACTIVE_STARTUP="$STARTUP"
+    echo "  ✓ Created $STARTUP (didn't exist before)"
 fi
 
+# 2b) Strip obsolete per-core daemon registrations from the active file
+sed -i '/pico8_daemon\.sh/d'              "$ACTIVE_STARTUP"
+sed -i '/openbor_4086_daemon\.sh/d'       "$ACTIVE_STARTUP"
+sed -i '/openbor_7533_daemon\.sh/d'       "$ACTIVE_STARTUP"
+sed -i '/music_player_daemon\.sh/d'       "$ACTIVE_STARTUP"
+sed -i '/PICO-8 auto-launch daemon/d'     "$ACTIVE_STARTUP"
+sed -i '/OpenBOR auto-launch daemon/d'    "$ACTIVE_STARTUP"
+echo "  ✓ Cleared obsolete per-core daemon registrations"
+
 # 3) Register Master_Daemon (idempotent)
-if [ -f "$STARTUP" ] && ! grep -qF "Master_Daemon.sh" "$STARTUP"; then
-    echo ""                                                    >> "$STARTUP"
-    echo "# MiSTer Frontier — hybrid core master daemon"       >> "$STARTUP"
-    echo "bash $MASTER &"                                       >> "$STARTUP"
-    echo "  ✓ Registered Master_Daemon in $STARTUP"
+if ! grep -qF "Master_Daemon.sh" "$ACTIVE_STARTUP"; then
+    echo ""                                                    >> "$ACTIVE_STARTUP"
+    echo "# MiSTer Frontier — hybrid core master daemon"       >> "$ACTIVE_STARTUP"
+    echo "bash $MASTER &"                                       >> "$ACTIVE_STARTUP"
+    echo "  ✓ Registered Master_Daemon in $ACTIVE_STARTUP"
 else
-    echo "  ✓ Master_Daemon already registered in $STARTUP"
+    echo "  ✓ Master_Daemon already registered in $ACTIVE_STARTUP"
 fi
 
 # 4) Kill any pre-existing per-core daemons (now obsolete)
