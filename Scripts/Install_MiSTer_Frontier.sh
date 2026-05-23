@@ -32,9 +32,45 @@ if [ ! -f "$MASTER" ]; then
     exit 1
 fi
 
-# 1) Make Master_Daemon executable
-chmod +x "$MASTER"
-echo "  ✓ $MASTER is executable"
+# 1) Set executable bit on Master_Daemon, hybrid-core ARM binaries, and
+# per-core _handler.sh launchers. raw.githubusercontent.com serves files
+# with mode 0644; on FAT/exFAT (most MiSTers) the missing exec bit is
+# silently tolerated — the kernel ignores mode bits on those filesystems.
+# BUT if /media/fat/games/ is hosted on an NFS share (where Unix
+# permissions ARE enforced), the ARM binaries can't be executed and the
+# hybrid cores black-screen on launch. Discovery-driven so future hybrid
+# cores added to /media/fat/games/<CoreName>/ get handled automatically.
+# Reported by community user 2026-05-23 (NFS-hosted /games/).
+chmod 0755 "$MASTER"
+echo "  ✓ chmod 0755 $MASTER"
+
+for handler in /media/fat/games/*/_handler.sh; do
+    [ -f "$handler" ] || continue
+    core_dir=$(dirname "$handler")
+    core_name=$(basename "$core_dir")
+    # Handler script
+    chmod 0755 "$handler" 2>/dev/null
+    echo "  ✓ chmod 0755 $handler"
+    # ARM binaries: every executable file directly in games/<CoreName>/
+    # that isn't a .sh script. Picks up PICO-8 + OpenBOR_4086 +
+    # OpenBOR_7533 today and any future hybrid-core binary automatically.
+    for f in "$core_dir"/*; do
+        [ -f "$f" ] || continue
+        case "$f" in
+            *.sh|*.p8|*.png|*.cfg|*.txt|*.md) continue ;;
+        esac
+        # Heuristic: file is a candidate ARM binary if it has no extension
+        # OR matches the core name pattern. Either way, chmod 0755 — no
+        # harm on FAT/exFAT; required on NFS.
+        bin=$(basename "$f")
+        case "$bin" in
+            "$core_name"|"$core_name"_*)
+                chmod 0755 "$f" 2>/dev/null
+                echo "  ✓ chmod 0755 $f"
+                ;;
+        esac
+    done
+done
 
 # 2a) Resolve which startup file MiSTer Main actually reads at boot.
 # MiSTer's convention: linux/user-startup.sh (no underscore) is executed.
