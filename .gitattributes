@@ -6,9 +6,13 @@
 *.bin       binary
 
 # ARM binaries (no extension — handled by path rules)
+# NOTE: MiSTer_Frontier is the DB combiner repo; per-core ARM binaries
+# live in their own repos (MiSTer_PICO-8, MiSTer_OpenBOR_4086,
+# MiSTer_OpenBOR_7533) and are pulled via external_files.csv. These
+# patterns are kept defensively in case binaries ever land here directly.
 games/PICO-8/PICO-8                 binary
-games/OpenBOR_4086/OpenBOR          binary
-games/OpenBOR_7533/OpenBOR          binary
+games/OpenBOR/OpenBOR_4086          binary
+games/OpenBOR/OpenBOR_7533          binary
 
 # Shell scripts — keep LF on disk regardless of host OS
 *.sh        text eol=lf
