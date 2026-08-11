@@ -3,18 +3,26 @@ name: Sync external_files.csv from per-core repos
 on:
   schedule:
     # Every 6 hours. RBF date-rolls only happen when the developer
-    # manually rebuilds in Quartus and pushes — infrequent. 6h polling
-    # is plenty.
+    # manually rebuilds in Quartus and pushes — infrequent.
+    #
+    # This cron is a BACKSTOP, not the primary mechanism. build_db.yml runs
+    # the same sync itself before every build, so a stale CSV can no longer
+    # take db.json offline while waiting for this to fire.
     - cron: '0 */6 * * *'
   workflow_dispatch:
-  # Trigger on pushes to per-core repos via repository_dispatch — see
-  # the Trigger section of any per-core build.yml. The dispatch type
-  # is `per-core-rbf-update`.
+  # Trigger on pushes to per-core repos via repository_dispatch.
+  #
+  # NOTE (2026-08-11): nothing currently SENDS this dispatch — no per-core
+  # workflow references `per-core-rbf-update`. The trigger is kept because
+  # it is the right hook if a per-core repo ever wants to push a roll
+  # through immediately, but do not rely on it as the mechanism; the
+  # in-build sync in build_db.yml is what actually guarantees currency.
   repository_dispatch:
     types: [per-core-rbf-update]
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sync:
@@ -28,6 +36,7 @@ jobs:
         run: python3 .github/scripts/sync_external_csv.py
 
       - name: Commit + push if CSV changed
+        id: commit
         run: |
           if ! git diff --quiet external_files.csv; then
             git config user.email "ci@misterorganize"
@@ -35,7 +44,22 @@ jobs:
             git add external_files.csv
             git commit -m "CI: sync external_files.csv from per-core repo RBF dates"
             git push
-            echo "CSV synced. The push will trigger build_db.yml to rebuild db.json.zip."
+            echo "changed=1" >> "$GITHUB_OUTPUT"
           else
             echo "CSV already in sync — no commit needed."
+            echo "changed=0" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Trigger DB rebuild
+        if: steps.commit.outputs.changed == '1'
+        # 🛑 The push above does NOT trigger build_db.yml. A push made with
+        # GITHUB_TOKEN never triggers other workflows -- that is GitHub's
+        # recursion guard, the same reason each per-core build.yml has to
+        # dispatch the DB rebuild explicitly after its binary commit-back.
+        #
+        # This file used to claim "The push will trigger build_db.yml to
+        # rebuild db.json.zip." That was FALSE, and it is why a corrected
+        # CSV still left db.json stale until the next daily cron.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run "Build Custom Database" -R "$GITHUB_REPOSITORY"

@@ -20,6 +20,60 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # ---------------------------------------------------------------------
+    # Resolve RBF date-rolls BEFORE building.
+    #
+    # db_operator FETCHES every URL in external_files.csv. When a per-core
+    # repo renames its RBF (_Other/PICO-8_20260616.rbf -> _20260801.rbf),
+    # this repo's CSV still names the old path, curl 404s, and the build
+    # does not degrade -- it ABORTS. db.json then silently stops updating
+    # for every update_all user while the per-core CI stays green.
+    #
+    # That is not hypothetical: it happened on 2026-08-11 and produced four
+    # consecutive red DB builds that nobody was watching, with new ARM
+    # binaries sitting on main and reaching no one.
+    #
+    # sync_csv.yml already knows how to fix the CSV, but it runs on a 6h
+    # cron, so the outage lasted until it fired. Running the same sync here
+    # makes EVERY rebuild self-healing regardless of what triggered it, in
+    # ONE place rather than as an ordering rule each per-core repo has to
+    # remember.
+    # ---------------------------------------------------------------------
+    - uses: actions/checkout@v4
+
+    - name: Sync external_files.csv from per-core repos
+      id: sync
+      # Non-fatal on purpose. A transient GitHub API hiccup here should
+      # leave us no worse than before this step existed -- the build below
+      # still runs, and fails loudly if the CSV is genuinely stale. Making
+      # it fatal would let an API blip block a rebuild that would otherwise
+      # have succeeded.
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: python3 .github/scripts/sync_external_csv.py
+
+    - name: Commit + push CSV if it changed
+      # The push must land BEFORE the build step, because build_db.py
+      # fetches the raw.githubusercontent URLs (i.e. what is on main), not
+      # this runner's working copy.
+      #
+      # No [skip ci] needed and no recursion risk: a push made with
+      # GITHUB_TOKEN does not trigger other workflows.
+      run: |
+        if ! git diff --quiet external_files.csv; then
+          git config user.email "ci@misterorganize"
+          git config user.name "MiSTer Organize CI"
+          git add external_files.csv
+          git commit -m "CI: sync external_files.csv from per-core repo RBF dates"
+          git push
+          echo "CSV was stale and has been corrected; building from the fixed CSV."
+          # Give raw.githubusercontent a moment to serve the new commit.
+          sleep 10
+        else
+          echo "CSV already in sync."
+        fi
+
     - name: Build Custom Database for MiSTer Downloader
       run: set -o pipefail && curl --fail --location https://raw.githubusercontent.com/theypsilon/Downloader_DB-Template_MiSTer/main/.github/build_db.py | python3 -
       env:
