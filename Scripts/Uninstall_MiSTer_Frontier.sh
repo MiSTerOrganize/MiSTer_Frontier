@@ -149,7 +149,14 @@ echo "     OK Killed Master_Daemon + per-core ARM binaries for: $DISCOVERED_CORE
 echo "2/8  Cleaning user-startup files (both .sh and _.sh variants)..."
 for f in "$STARTUP" "$STARTUP_UNDERSCORE"; do
     [ -f "$f" ] || continue
-    sed -i '/# MiSTer Frontier — hybrid core master daemon/d' "$f"
+    # Dash-agnostic on purpose. Three spellings of this comment have shipped --
+    # Master_Daemon.sh wrote an em-dash then a single hyphen, Install writes a
+    # double hyphen -- so an exact-match address strips SOME installs and leaves
+    # an orphan comment on the rest. (The registration LINE is removed by the
+    # next sed regardless, so this was never a failed uninstall, just litter.)
+    # `.*` matches every variant, past and future, and carries no non-ASCII byte
+    # into a distributed script.
+    sed -i '/# MiSTer Frontier .* hybrid core master daemon/d' "$f"
     sed -i '/MiSTer_Frontier\/Master_Daemon\.sh/d'            "$f"
     # Also strip pre-Master_Daemon-era per-core daemon registrations
     sed -i '/pico8_daemon\.sh/d'              "$f"

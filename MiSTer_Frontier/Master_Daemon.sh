@@ -52,7 +52,10 @@ log() {
 # Belt-and-suspenders for the case where the install script wasn't run.
 if [ -f "$STARTUP" ] && ! grep -qF "Master_Daemon.sh" "$STARTUP"; then
     echo "" >> "$STARTUP"
-    echo "# MiSTer Frontier - hybrid core master daemon" >> "$STARTUP"
+    # Byte-identical to Install_MiSTer_Frontier.sh's line. They wrote different
+    # dashes for months, so whichever registered you decided whether Uninstall's
+    # matcher found it. Keep these two in sync.
+    echo "# MiSTer Frontier -- hybrid core master daemon" >> "$STARTUP"
     echo "bash $SELF &" >> "$STARTUP"
     log "Self-registered in $STARTUP"
 fi
