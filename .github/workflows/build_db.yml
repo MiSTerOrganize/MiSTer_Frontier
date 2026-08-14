@@ -61,18 +61,58 @@ jobs:
       # No [skip ci] needed and no recursion risk: a push made with
       # GITHUB_TOKEN does not trigger other workflows.
       run: |
-        if ! git diff --quiet external_files.csv; then
-          git config user.email "ci@misterorganize"
-          git config user.name "MiSTer Organize CI"
-          git add external_files.csv
-          git commit -m "CI: sync external_files.csv from per-core repo RBF dates"
-          git push
-          echo "CSV was stale and has been corrected; building from the fixed CSV."
-          # Give raw.githubusercontent a moment to serve the new commit.
-          sleep 10
-        else
+        if git diff --quiet external_files.csv; then
           echo "CSV already in sync."
+          exit 0
         fi
+
+        git config user.email "ci@misterorganize"
+        git config user.name "MiSTer Organize CI"
+
+        # RETRY ON REJECT. A bare `git push` here loses any race with a
+        # concurrent dispatch or the daily cron, and because this step runs
+        # under `bash -e` that failure SKIPS the build below -- so db.json keeps
+        # the previous hashes while raw.githubusercontent already serves the new
+        # binary. That mismatch is what makes the downloader reject and DELETE
+        # the file, which the user sees as a black screen.
+        #
+        # Rebase is correct here because external_files.csv is TEXT and the
+        # racing writers make the same edit. It is FORBIDDEN in the per-core
+        # binary commit-back, where the payload is a binary blob and a rebase is
+        # an unresolvable conflict. Same command, opposite verdict.
+        pushed=0
+        for attempt in 1 2 3 4 5; do
+          git add external_files.csv
+          git commit -m "CI: sync external_files.csv from per-core repo RBF dates" || true
+          if git push; then pushed=1; break; fi
+
+          echo "push rejected (attempt $attempt) -- fetching and rebasing"
+          git fetch origin main
+          if ! git rebase origin/main; then
+            git rebase --abort || true
+            echo "::error::CSV rebase conflicted -- refusing to guess. Fix external_files.csv by hand."
+            exit 1
+          fi
+
+          # A race whose other side made the SAME edit leaves nothing to commit.
+          # main is already correct, so proceed to the build rather than failing.
+          if git diff --quiet origin/main -- external_files.csv; then
+            echo "another run already pushed an identical CSV -- continuing to the build"
+            pushed=1
+            break
+          fi
+        done
+
+        if [ "$pushed" != "1" ]; then
+          echo "::error::could not push external_files.csv after 5 attempts. NOT building:"
+          echo "::error::build_db.py reads raw.githubusercontent (i.e. main), so it would"
+          echo "::error::publish a db.json built from the STALE csv."
+          exit 1
+        fi
+
+        echo "CSV in sync on main; building from it."
+        # Give raw.githubusercontent a moment to serve the new commit.
+        sleep 10
 
     - name: Build Custom Database for MiSTer Downloader
       run: set -o pipefail && curl --fail --location https://raw.githubusercontent.com/theypsilon/Downloader_DB-Template_MiSTer/main/.github/build_db.py | python3 -
