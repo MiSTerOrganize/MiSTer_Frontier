@@ -265,6 +265,15 @@ if [ "$PURGE_USER_CONTENT" = "yes" ]; then
         rm -rf /media/fat/logs/"$core_name"       2>/dev/null
         rm -rf /media/fat/logs/"$core_name"_*     2>/dev/null
 
+        # Gameplay recordings. Same per-build split as saves/ and savestates/,
+        # and a top-level tree rather than something under games/, which is why
+        # the two rm -rf's above did not reach it. Left behind, purge removed
+        # every other trace of the core -- including the content library -- and
+        # told the user so, while the takes, .snapshots, .scratch and .armsnap
+        # all survived.
+        rm -rf /media/fat/replays/"$core_name"    2>/dev/null
+        rm -rf /media/fat/replays/"$core_name"_*  2>/dev/null
+
         # MiSTer OSD config (one per build)
         rm -f  /media/fat/config/"$core_name".cfg     2>/dev/null
         rm -f  /media/fat/config/"$core_name"_*.cfg   2>/dev/null

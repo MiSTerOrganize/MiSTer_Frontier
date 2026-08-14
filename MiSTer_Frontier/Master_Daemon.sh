@@ -63,28 +63,49 @@ discover_cores() {
 # ── Startup chmod sweep ──────────────────────────────────────────────
 # update_all places files at default umask (no execute bit). Master
 # fixes that for every hybrid binary + handler at boot.
+# 🛑 The binary name is NOT always the folder name. The folder is "OpenBOR"
+# while the binaries are OpenBOR_4086 and OpenBOR_7533, so the old
+# "$core/$core" form resolved to games/OpenBOR/OpenBOR -- a path that does not
+# exist -- and this sweep silently did nothing for either OpenBOR core for as
+# long as it has existed. PICO-8 worked only because its names coincide.
+#
+# That matters on an NFS-hosted /games, where Unix permissions are enforced and
+# update_all (which runs repeatedly) strips the execute bit, while
+# Install_MiSTer_Frontier.sh (which sets it) runs once. Install already uses
+# this exact "$core_name"|"$core_name"_* shape; the daemon did not.
 for core in $(discover_cores); do
-    bin="$GAMES_ROOT/$core/$core"
     handler="$GAMES_ROOT/$core/_handler.sh"
-    [ -f "$bin" ]     && chmod +x "$bin"     2>/dev/null
     [ -f "$handler" ] && chmod +x "$handler" 2>/dev/null
+    for bin in "$GAMES_ROOT/$core/$core" "$GAMES_ROOT/$core/$core"_*; do
+        [ -f "$bin" ] && chmod +x "$bin" 2>/dev/null
+    done
 done
 log "Startup chmod sweep: $(discover_cores | tr '\n' ' ')"
 
 # ── Startup zombie sweep ─────────────────────────────────────────────
 # Kill any leftover hybrid-core binary from a previous master instance
-# (deploy script kill, crash, manual SSH restart). Filter by
-# /proc/$pid/cwd matching the core's GAMEDIR so we never kill an
-# unrelated process that happens to share a binary name (the OpenBOR
-# variants both name their binary "OpenBOR").
+# (deploy script kill, crash, manual SSH restart).
+#
+# Same folder-name-vs-binary-name bug as the chmod sweep above: `pidof OpenBOR`
+# matches nothing, because the running binaries are OpenBOR_4086 and
+# OpenBOR_7533. This swept only PICO-8. Enumerate the real binaries instead.
+#
+# pidof matches the executable BASENAME exactly, so it can never match MiSTer
+# Main (basename "MiSTer") -- unlike a grep over cmdline, which would, because
+# Main's argv carries the .rbf path. The /proc/$pid/cwd filter is a second
+# guard: it pins the kill to a process actually launched from this GAMEDIR.
 for core in $(discover_cores); do
     GAMEDIR="$GAMES_ROOT/$core"
-    for pid in $(pidof "$core" 2>/dev/null); do
-        cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
-        if [ "$cwd" = "$GAMEDIR" ]; then
-            kill -9 "$pid" 2>/dev/null
-            log "Startup: killed rogue $core PID $pid"
-        fi
+    for bin in "$GAMEDIR/$core" "$GAMEDIR/$core"_*; do
+        [ -f "$bin" ] || continue
+        bname=$(basename "$bin")
+        for pid in $(pidof "$bname" 2>/dev/null); do
+            cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
+            if [ "$cwd" = "$GAMEDIR" ]; then
+                kill -9 "$pid" 2>/dev/null
+                log "Startup: killed rogue $bname PID $pid"
+            fi
+        done
     done
 done
 
