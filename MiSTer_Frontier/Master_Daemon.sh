@@ -52,7 +52,7 @@ log() {
 # Belt-and-suspenders for the case where the install script wasn't run.
 if [ -f "$STARTUP" ] && ! grep -qF "Master_Daemon.sh" "$STARTUP"; then
     echo "" >> "$STARTUP"
-    echo "# MiSTer Frontier — hybrid core master daemon" >> "$STARTUP"
+    echo "# MiSTer Frontier - hybrid core master daemon" >> "$STARTUP"
     echo "bash $SELF &" >> "$STARTUP"
     log "Self-registered in $STARTUP"
 fi
