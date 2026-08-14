@@ -31,7 +31,7 @@ STARTUP="/media/fat/linux/user-startup.sh"
 STARTUP_UNDERSCORE="/media/fat/linux/_user-startup.sh"
 MASTER="/media/fat/MiSTer_Frontier/Master_Daemon.sh"
 
-echo "=== MiSTer Frontier — Uninstall ==="
+echo "=== MiSTer Frontier -- Uninstall ==="
 echo
 
 # ─── Discovery: find every hybrid core installed under this Frontier ───
@@ -66,11 +66,11 @@ PURGE_USER_CONTENT="no"
 if [ -t 0 ]; then
     echo "Two uninstall modes:"
     echo
-    echo "  [S] Safe (recommended) — removes cores + system files only."
+    echo "  [S] Safe (recommended) -- removes cores + system files only."
     echo "      KEEPS your saves, savestates, configs, high scores, PAKs, carts."
-    echo "      Reinstall later → everything still works."
+    echo "      Reinstall later -> everything still works."
     echo
-    echo "  [P] Purge — also removes user content (saves, savestates, configs,"
+    echo "  [P] Purge -- also removes user content (saves, savestates, configs,"
     echo "      Paks/, Carts/, and equivalent per-core user dirs)."
     echo "      Use this only if you want zero trace of the cores."
     echo
@@ -97,7 +97,7 @@ if [ -t 0 ]; then
             ;;
     esac
 else
-    echo "(Non-interactive mode — defaulting to SAFE uninstall, preserving user content)"
+    echo "(Non-interactive mode -- defaulting to SAFE uninstall, preserving user content)"
 fi
 
 echo
@@ -143,7 +143,7 @@ for core_name in $DISCOVERED_CORES; do
     done
 done
 sleep 1
-echo "     ✓ Killed Master_Daemon + per-core ARM binaries for: $DISCOVERED_CORES"
+echo "     OK Killed Master_Daemon + per-core ARM binaries for: $DISCOVERED_CORES"
 
 # ─── 2) Strip Master_Daemon entry from both user-startup variants ───
 echo "2/8  Cleaning user-startup files (both .sh and _.sh variants)..."
@@ -158,7 +158,7 @@ for f in "$STARTUP" "$STARTUP_UNDERSCORE"; do
     sed -i '/music_player_daemon\.sh/d'       "$f"
     sed -i '/PICO-8 auto-launch daemon/d'     "$f"
     sed -i '/OpenBOR auto-launch daemon/d'    "$f"
-    echo "     ✓ Cleaned $f"
+    echo "     OK Cleaned $f"
 done
 
 # ─── 3) Remove MiSTer Frontier bootstrap (Master_Daemon + Install) ───
@@ -168,7 +168,7 @@ done
 echo "3/8  Removing MiSTer Frontier bootstrap (Master_Daemon + Install)..."
 rm -rf /media/fat/MiSTer_Frontier                    2>/dev/null
 rm -f  /media/fat/Scripts/Install_MiSTer_Frontier.sh 2>/dev/null
-echo "     ✓ Removed /media/fat/MiSTer_Frontier/ and Install_MiSTer_Frontier.sh"
+echo "     OK Removed /media/fat/MiSTer_Frontier/ and Install_MiSTer_Frontier.sh"
 
 # ─── 4) Per-core file removal (discovery-driven) ───
 echo "4/8  Removing per-core files for each discovered core..."
@@ -216,7 +216,7 @@ for core_name in $DISCOVERED_CORES; do
     rm -f "/tmp/$(echo "$core_name" | tr A-Z a-z)_reset_marker"   2>/dev/null
     rm -f "/tmp/$(echo "$core_name" | tr A-Z a-z)_hotswap_marker" 2>/dev/null
 
-    echo "     ✓ Cleaned core: $core_name"
+    echo "     OK Cleaned core: $core_name"
 done
 
 # ─── 5) Also clean sister-cored engines' shared dirs ───
@@ -246,7 +246,7 @@ for s0 in /media/fat/config/*.s0; do
         # mode; only remove in purge.
         if [ "$PURGE_USER_CONTENT" = "yes" ]; then
             rm -f "$s0"
-            echo "     ✓ Removed orphan $s0 (purge mode)"
+            echo "     OK Removed orphan $s0 (purge mode)"
         fi
     fi
 done
@@ -281,7 +281,7 @@ if [ "$PURGE_USER_CONTENT" = "yes" ]; then
         # User content libraries inside games/<CoreName>/ (subdirs we
         # preserved in step 4 — Carts/, Paks/, etc.)
         rm -rf "/media/fat/games/$core_name"          2>/dev/null
-        echo "     ✓ Purged $core_name"
+        echo "     OK Purged $core_name"
     done
 
     # Engine-specific configs (NOT per-build; sister cores share these)
@@ -295,7 +295,7 @@ if [ "$PURGE_USER_CONTENT" = "yes" ]; then
     # remove the engine fallback files. User can hand-remove per-PAK
     # files in /media/fat/config/ if they want.
 
-    echo "     ✓ Also removed engine-shared configs (zepto8.cfg, default.cfg)"
+    echo "     OK Also removed engine-shared configs (zepto8.cfg, default.cfg)"
 else
     echo "7/8  Skipping user content (safe mode)"
     echo "     User content preserved per discovered core:"
@@ -323,27 +323,27 @@ echo "=== Uninstall complete ==="
 echo
 echo "Verification:"
 if [ ! -d "/media/fat/MiSTer_Frontier" ]; then
-    echo "  ✓ /media/fat/MiSTer_Frontier/ removed"
+    echo "  OK /media/fat/MiSTer_Frontier/ removed"
 else
-    echo "  ⚠ /media/fat/MiSTer_Frontier/ still exists — manual cleanup needed"
+    echo "  ! /media/fat/MiSTer_Frontier/ still exists -- manual cleanup needed"
 fi
 if ! ps | grep -E "Master_Daemon\.sh" | grep -v grep > /dev/null; then
-    echo "  ✓ No Master_Daemon process running"
+    echo "  OK No Master_Daemon process running"
 fi
 remaining_cores=""
 for handler in /media/fat/games/*/_handler.sh; do
     [ -f "$handler" ] && remaining_cores="$remaining_cores $(basename $(dirname "$handler"))"
 done
 if [ -z "$remaining_cores" ]; then
-    echo "  ✓ No hybrid-core handlers remain"
+    echo "  OK No hybrid-core handlers remain"
 else
-    echo "  ⚠ Some hybrid-core handlers still present:$remaining_cores"
+    echo "  ! Some hybrid-core handlers still present:$remaining_cores"
     echo "    (likely user-installed non-Frontier cores; not touched)"
 fi
 echo
 
 # Manual step: downloader.ini
-echo "⚠ IMPORTANT — one manual step left:"
+echo "! IMPORTANT -- one manual step left:"
 echo
 echo "   update_all will RE-DOWNLOAD these files on your next run unless"
 echo "   you also unsubscribe from the MiSTer Frontier database. Edit:"
@@ -357,7 +357,7 @@ echo "     db_url = https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Fron
 echo
 echo "   After that, update_all will skip MiSTer Frontier entirely."
 echo
-echo "Reboot is NOT required — the daemon is killed and won't auto-start"
+echo "Reboot is NOT required -- the daemon is killed and won't auto-start"
 echo "again (we removed the user-startup.sh entry). But a reboot is fine"
 echo "if you want a fully fresh state."
 echo
