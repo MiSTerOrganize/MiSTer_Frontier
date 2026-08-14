@@ -170,17 +170,42 @@ if [ -d /media/fat/docs/OpenBOR_4086 ] || [ -d /media/fat/docs/OpenBOR_7533 ]; t
     echo "  OK Removed legacy per-build docs/OpenBOR_*/ folders (single docs/OpenBOR/ now)"
 fi
 
-# 5) Kill any prior Master_Daemon instance, then start fresh
-ps | grep "Master_Daemon.sh" | grep -v grep | awk '{print $1}' | xargs -r kill 2>/dev/null
+# 5) Kill any prior Master_Daemon instance, then start fresh.
+#
+# 🛑 Master_Daemon is a SINGLETON. Two of them fight over the same DDR3 video
+# ring and produce jitter on every PAK, hot-swap failures and duplicate UI --
+# symptoms that read exactly like a code regression and once cost this project
+# a three-hour misdiagnosis. So this must END at exactly one, and must be able
+# to say so.
+#
+# The old form was `ps | grep | awk | xargs -r kill` + `sleep 1` + unconditional
+# start, then a check that asked only whether AT LEAST ONE exists -- which is
+# true of a stacked pair. Two ways it stacked: BusyBox `ps` truncates COMMAND to
+# terminal width, so a narrow console hides the match; and the outgoing daemon's
+# own TERM trap sleeps 1s killing its child, outliving the sleep here.
+_count_daemons() { ps -e -o pid,ppid,args 2>/dev/null \
+    | grep -E "bash.*Master_Daemon\.sh" | grep -v grep | awk '$2==1' | wc -l; }
+
+pkill -TERM -f "Master_Daemon.sh" 2>/dev/null
+sleep 2
+pkill -KILL -f "Master_Daemon.sh" 2>/dev/null
 sleep 1
 
-nohup bash "$MASTER" </dev/null >/dev/null 2>&1 &
-sleep 1
-
-if ps | grep "Master_Daemon.sh" | grep -v grep > /dev/null; then
-    echo "  OK Master_Daemon started"
+if [ "$(_count_daemons)" != "0" ]; then
+    echo "  ! A Master_Daemon survived SIGKILL -- NOT starting another."
+    echo "    Starting one now would stack a second instance. Reboot, then re-run."
 else
-    echo "  ! Master_Daemon failed to start -- check $MASTER for errors"
+    nohup bash "$MASTER" </dev/null >/dev/null 2>&1 &
+    sleep 1
+    _n=$(_count_daemons)
+    if [ "$_n" = "1" ]; then
+        echo "  OK Master_Daemon started (exactly 1 running)"
+    elif [ "$_n" = "0" ]; then
+        echo "  ! Master_Daemon failed to start -- check $MASTER for errors"
+    else
+        echo "  ! $_n Master_Daemon instances are running -- that is a dual-daemon."
+        echo "    Reboot to clear it; do not leave it in this state."
+    fi
 fi
 
 echo

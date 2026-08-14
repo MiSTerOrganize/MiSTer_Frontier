@@ -47,7 +47,12 @@ for handler in /media/fat/games/*/_handler.sh; do
     core_name=$(basename "$core_dir")
     DISCOVERED_CORES="$DISCOVERED_CORES $core_name"
 done
-DISCOVERED_CORES=$(echo "$DISCOVERED_CORES" | xargs)  # trim
+# Trim with sed, NOT xargs. xargs interprets quotes and backslashes, so a core
+# folder named "Dave's Core" makes BusyBox xargs abort on an unmatched quote and
+# emit nothing -- DISCOVERED_CORES goes empty, the sanity check below then takes
+# the "not installed" path, and the uninstall does nothing while reporting
+# success.
+DISCOVERED_CORES=$(echo "$DISCOVERED_CORES" | sed 's/^ *//; s/ *$//')
 
 # Sanity: anything installed?
 if [ -z "$DISCOVERED_CORES" ] && [ ! -f "$MASTER" ]; then
@@ -124,8 +129,13 @@ for core_name in $DISCOVERED_CORES; do
         bin=$(basename "$f")
         killall -TERM "$bin" 2>/dev/null
     done
-    # Also kill by cwd as a backstop (catches any binary we missed)
-    for pid in $(pidof -x 2>/dev/null); do
+    # Backstop: catch a binary the name sweep above missed (renamed, or one we
+    # never discovered) by matching its working directory.
+    #
+    # This was `pidof -x` with NO program operand, which enumerates nothing --
+    # the loop body never ran, so a guard the comment describes as a backstop
+    # was structurally incapable of firing. Walk /proc, which needs no operand.
+    for pid in $(ls -1 /proc 2>/dev/null | grep -E '^[0-9]+$'); do
         cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
         [ "$cwd" = "$core_dir" ] && kill -TERM "$pid" 2>/dev/null
     done
@@ -182,11 +192,32 @@ echo "4/8  Removing per-core files for each discovered core..."
 for core_name in $DISCOVERED_CORES; do
     core_dir="/media/fat/games/$core_name"
 
-    # Remove the games/<CoreName>/ dir contents — every file directly in
-    # it is ours (handlers, ARM binaries, BIOS). User content lives in
-    # subdirs (games/<CoreName>/Carts/, /Paks/, etc.) which we preserve
-    # in safe mode and handle separately in purge mode.
-    find "$core_dir" -maxdepth 1 -type f -delete 2>/dev/null
+    # Remove OUR files from games/<CoreName>/ -- by NAME, never "everything".
+    #
+    # This used to be `find "$core_dir" -maxdepth 1 -type f -delete`, justified
+    # as "every file directly in it is ours". That is not true: games/OpenBOR/
+    # is the folder MiSTer's OSD browser OPENS AT, so a user dropping Foo.pak or
+    # mygame.p8.png straight in there -- rather than into Paks/ -- is ordinary.
+    # Safe mode deleted it and then printed "Skipping user content (safe mode)".
+    #
+    # 🛑 An `[ -x ]` test cannot substitute: /media/fat is FAT/exFAT, which
+    # reports EVERY file as executable, so that heuristic keeps nothing.
+    #
+    # Ours is: the handler, the ARM binary (<CoreName> or <CoreName>_<Build>),
+    # and a shipped BIOS. Collect the binary stems BEFORE deleting -- the RBF
+    # sweep below needs them, and it used to run after the blanket delete had
+    # already removed everything it looked for, making it unreachable.
+    CORE_BINS=""
+    for f in "$core_dir"/*; do
+        [ -f "$f" ] || continue
+        bn=$(basename "$f")
+        case "$bn" in
+            _handler.sh|bios.p8) ;;
+            "$core_name"|"$core_name"_*) CORE_BINS="$CORE_BINS $bn" ;;
+            *) continue ;;
+        esac
+        rm -f "$f" 2>/dev/null
+    done
 
     # Remove docs/<CoreName>/ (single core name only — OpenBOR sister
     # cores share one docs/OpenBOR/ that gets removed exactly once via
@@ -200,11 +231,14 @@ for core_name in $DISCOVERED_CORES; do
     # under games/OpenBOR/ but with build-suffixed RBF names. Match those
     # by scanning game-dir executables and treating their stems as RBF
     # prefixes.)
-    for f in "$core_dir"/*; do
-        [ -f "$f" ] || continue
-        [ -x "$f" ] || continue
-        case "$f" in *.sh) continue;; esac
-        bin=$(basename "$f")
+    # Uses the stems captured BEFORE the removal above. Re-scanning the
+    # directory here found nothing, because the files it wanted were already
+    # deleted -- the sister-core case this block exists for (OpenBOR_4086_*.rbf
+    # / OpenBOR_7533_*.rbf, whose stems differ from the folder name) was covered
+    # only by luck, because "$core_name"_*.rbf on line above happens to match
+    # both. A core whose binary stem differs from its folder name would have
+    # left its RBFs behind with no error.
+    for bin in $CORE_BINS; do
         rm -f "/media/fat/_Other/$bin"_*.rbf 2>/dev/null
     done
 
@@ -219,9 +253,13 @@ for core_name in $DISCOVERED_CORES; do
     # cores share .s0). The simple-case .s0 is named <CoreName>.s0.
     rm -f "/media/fat/config/$core_name.s0" 2>/dev/null
 
-    # Per-core /tmp markers (lowercase corename convention)
-    rm -f "/tmp/$(echo "$core_name" | tr A-Z a-z)_reset_marker"   2>/dev/null
-    rm -f "/tmp/$(echo "$core_name" | tr A-Z a-z)_hotswap_marker" 2>/dev/null
+    # Per-core /tmp markers. The convention strips the hyphen as well as
+    # lowercasing -- PICO-8's markers are /tmp/pico8_*, not /tmp/pico-8_* -- so
+    # a `tr A-Z a-z` alone targeted a path that never exists. The recorder
+    # markers (_recmode, _recslot, _playfile, _recwarn, _recstop) were not
+    # covered at all; a survivor is read by the next core that starts.
+    _mk=$(echo "$core_name" | tr 'A-Z' 'a-z' | tr -d '-')
+    rm -f "/tmp/${_mk}_"* 2>/dev/null
 
     echo "     OK Cleaned core: $core_name"
 done
