@@ -1,4 +1,11 @@
 #!/bin/bash
+# Re-exec under bash if started with `sh <script>`. This file uses bash
+# features -- arrays, `read -n 1`, `read -d` -- that ash silently mishandles
+# rather than refusing, so a `sh` invocation would not fail, it would
+# misbehave: the prompt reads nothing and, under `set -u`, dies on an unset
+# choice; the migration loop errors out mid-move leaving content split
+# across two folders.
+[ -n "$BASH_VERSION" ] || exec bash "$0" "$@"
 #
 # MiSTer Frontier — Uninstall
 #
@@ -40,22 +47,26 @@ echo
 # discovered CoreName becomes a target for per-core cleanup. Beetle VB
 # or any future hybrid core added to the public manifest will be picked
 # up automatically by this enumeration — no script update needed.
-DISCOVERED_CORES=""
+# ARRAY, not a space-separated string. A core folder named "Game King" --
+# and Game King is on this project's roadmap -- word-split into "Game" and
+# "King", so every rm/kill built from it targeted a wrong path while
+# reporting success. rm -f and rm -rf both exit 0 on a path that does not
+# exist, so nothing surfaced.
+DISCOVERED_CORES=()
 for handler in /media/fat/games/*/_handler.sh; do
     [ -f "$handler" ] || continue
     core_dir=$(dirname "$handler")
     core_name=$(basename "$core_dir")
-    DISCOVERED_CORES="$DISCOVERED_CORES $core_name"
+    DISCOVERED_CORES+=("$core_name")
 done
-# Trim with sed, NOT xargs. xargs interprets quotes and backslashes, so a core
-# folder named "Dave's Core" makes BusyBox xargs abort on an unmatched quote and
-# emit nothing -- DISCOVERED_CORES goes empty, the sanity check below then takes
-# the "not installed" path, and the uninstall does nothing while reporting
-# success.
-DISCOVERED_CORES=$(echo "$DISCOVERED_CORES" | sed 's/^ *//; s/ *$//')
+# No trim step: an array holds its elements verbatim. This used to be
+# `| xargs`, purely to strip whitespace -- but xargs also interprets quotes,
+# so a core named "Dave's Core" aborted BusyBox xargs on an unmatched quote,
+# emptied the list, and sent the run down the "not installed" path while
+# reporting success.
 
 # Sanity: anything installed?
-if [ -z "$DISCOVERED_CORES" ] && [ ! -f "$MASTER" ]; then
+if [ ${#DISCOVERED_CORES[@]} -eq 0 ] && [ ! -f "$MASTER" ]; then
     echo "MiSTer Frontier doesn't appear to be installed (no Master_Daemon,"
     echo "no hybrid-core _handler.sh files found under /media/fat/games/)."
     echo
@@ -63,7 +74,7 @@ if [ -z "$DISCOVERED_CORES" ] && [ ! -f "$MASTER" ]; then
     exit 0
 fi
 
-echo "Discovered hybrid cores: ${DISCOVERED_CORES:-(none)}"
+echo "Discovered hybrid cores: ${DISCOVERED_CORES[*]:-(none)}"
 echo
 
 # ─── Ask about purge mode (interactive only) ───
@@ -118,7 +129,7 @@ pkill -TERM -f "Master_Daemon.sh" 2>/dev/null
 
 # Per-core: kill any process whose cwd is inside this core's games dir,
 # OR whose binary name matches an executable in that dir.
-for core_name in $DISCOVERED_CORES; do
+for core_name in "${DISCOVERED_CORES[@]}"; do
     core_dir="/media/fat/games/$core_name"
     # Collect candidate binary names from this core's games dir
     # (executable files that aren't .sh scripts)
@@ -144,7 +155,7 @@ sleep 1
 
 # Force-kill anything still running
 pkill -KILL -f "Master_Daemon.sh" 2>/dev/null
-for core_name in $DISCOVERED_CORES; do
+for core_name in "${DISCOVERED_CORES[@]}"; do
     core_dir="/media/fat/games/$core_name"
     for f in "$core_dir"/*; do
         [ -f "$f" ] && [ -x "$f" ] || continue
@@ -153,7 +164,7 @@ for core_name in $DISCOVERED_CORES; do
     done
 done
 sleep 1
-echo "     OK Killed Master_Daemon + per-core ARM binaries for: $DISCOVERED_CORES"
+echo "     OK Killed Master_Daemon + per-core ARM binaries for: ${DISCOVERED_CORES[*]}"
 
 # ─── 2) Strip Master_Daemon entry from both user-startup variants ───
 echo "2/8  Cleaning user-startup files (both .sh and _.sh variants)..."
@@ -189,7 +200,7 @@ echo "     OK Removed /media/fat/MiSTer_Frontier/ and Install_MiSTer_Frontier.sh
 
 # ─── 4) Per-core file removal (discovery-driven) ───
 echo "4/8  Removing per-core files for each discovered core..."
-for core_name in $DISCOVERED_CORES; do
+for core_name in "${DISCOVERED_CORES[@]}"; do
     core_dir="/media/fat/games/$core_name"
 
     # Remove OUR files from games/<CoreName>/ -- by NAME, never "everything".
@@ -299,7 +310,7 @@ done
 # ─── 7) Purge mode — also remove per-core user content ───
 if [ "$PURGE_USER_CONTENT" = "yes" ]; then
     echo "7/8  PURGING per-core user content (saves, savestates, logs, configs, content libs)..."
-    for core_name in $DISCOVERED_CORES; do
+    for core_name in "${DISCOVERED_CORES[@]}"; do
         # Per-build save/savestate/log dirs: name OR name_<suffix>
         # (sister-cored engines split per-build: saves/OpenBOR_4086/ +
         # saves/OpenBOR_7533/, not saves/OpenBOR/)
@@ -344,7 +355,7 @@ if [ "$PURGE_USER_CONTENT" = "yes" ]; then
 else
     echo "7/8  Skipping user content (safe mode)"
     echo "     User content preserved per discovered core:"
-    for core_name in $DISCOVERED_CORES; do
+    for core_name in "${DISCOVERED_CORES[@]}"; do
         [ -d "/media/fat/saves/$core_name" ]       && echo "       /media/fat/saves/$core_name/"
         for d in /media/fat/saves/"$core_name"_*; do
             [ -d "$d" ] && echo "       $d/"

@@ -1,4 +1,11 @@
 #!/bin/bash
+# Re-exec under bash if started with `sh <script>`. This file uses bash
+# features -- arrays, `read -n 1`, `read -d` -- that ash silently mishandles
+# rather than refusing, so a `sh` invocation would not fail, it would
+# misbehave: the prompt reads nothing and, under `set -u`, dies on an unset
+# choice; the migration loop errors out mid-move leaving content split
+# across two folders.
+[ -n "$BASH_VERSION" ] || exec bash "$0" "$@"
 #
 # MiSTer Frontier — One-time install
 #
