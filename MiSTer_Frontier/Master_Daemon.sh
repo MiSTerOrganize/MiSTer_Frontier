@@ -83,7 +83,7 @@ discover_cores() {
 # update_all (which runs repeatedly) strips the execute bit, while
 # Install_MiSTer_Frontier.sh (which sets it) runs once. Install already uses
 # this exact "$core_name"|"$core_name"_* shape; the daemon did not.
-for core in $(discover_cores); do
+discover_cores | while IFS= read -r core; do
     handler="$GAMES_ROOT/$core/_handler.sh"
     [ -f "$handler" ] && chmod +x "$handler" 2>/dev/null
     for bin in "$GAMES_ROOT/$core/$core" "$GAMES_ROOT/$core/$core"_*; do
@@ -104,7 +104,7 @@ log "Startup chmod sweep: $(discover_cores | tr '\n' ' ')"
 # Main (basename "MiSTer") -- unlike a grep over cmdline, which would, because
 # Main's argv carries the .rbf path. The /proc/$pid/cwd filter is a second
 # guard: it pins the kill to a process actually launched from this GAMEDIR.
-for core in $(discover_cores); do
+discover_cores | while IFS= read -r core; do
     GAMEDIR="$GAMES_ROOT/$core"
     for bin in "$GAMEDIR/$core" "$GAMEDIR/$core"_*; do
         [ -f "$bin" ] || continue
@@ -186,12 +186,21 @@ while true; do
     # setname so CORENAME doesn't change when switching between them.
     # Without RBF tracking, swapping 4086 ↔ 7533 leaves the previous
     # binary running with the previous PAK auto-mounted via .s0.
-    MISTER_PID=$(pidof MiSTer 2>/dev/null | awk '{print $1}')
+    # Take the MiSTer whose argv actually names an .rbf, not merely the first
+    # PID. `pidof MiSTer | awk '{print $1}'` picked one arbitrarily, so with a
+    # lingering second MiSTer process CUR_RBF resolved from the wrong cmdline or
+    # came back empty -- which silently disables the sister-core swap detection
+    # just below, the exact regression RBF tracking was added for. The OpenBOR
+    # handler already selects this way. cmdline is NUL-separated; argv[1] is the
+    # loaded RBF path.
     CUR_RBF=""
-    if [ -n "$MISTER_PID" ] && [ -r "/proc/$MISTER_PID/cmdline" ]; then
-        # cmdline is NUL-separated; argv[1] is the loaded RBF path
-        CUR_RBF=$(tr '\0' '\n' < "/proc/$MISTER_PID/cmdline" 2>/dev/null | sed -n 2p)
-    fi
+    for _mp in $(pidof MiSTer 2>/dev/null); do
+        [ -r "/proc/$_mp/cmdline" ] || continue
+        _rbf=$(tr '\0' '\n' < "/proc/$_mp/cmdline" 2>/dev/null | sed -n 2p)
+        case "$_rbf" in
+            *.rbf) CUR_RBF="$_rbf"; break ;;
+        esac
+    done
 
     # Core changed OR (same core but RBF changed — sister-core swap)?
     if [ "$CUR" != "$LAST" ] || { [ -n "$CUR_RBF" ] && [ -n "$LAST_RBF" ] && [ "$CUR_RBF" != "$LAST_RBF" ]; }; then
