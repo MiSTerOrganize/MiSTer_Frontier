@@ -37,6 +37,13 @@ CONFIG_ROOT="/media/fat/config"
 mkdir -p "$LOGDIR"
 LOG="$LOGDIR/Master_Daemon.log"
 
+# Rotate at launch, exactly like every per-core handler does. This log had NO
+# rotation and NO prune anywhere in the script -- the one shipped script the
+# project's own auto-prune rule did not reach -- so it grew monotonically for
+# the life of the SD card. One .prev generation is enough here: the daemon logs
+# a handful of lines per core switch, not per frame.
+[ -f "$LOG" ] && mv -f "$LOG" "$LOG.prev" 2>/dev/null
+
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
 }
@@ -152,6 +159,23 @@ for HANDLER_DIR in "$GAMES_ROOT"/*/_handler.sh; do
 done
 
 LAST_RBF=""
+
+# Respawn backoff. A handler that exits immediately -- missing $GAMEDIR so its
+# `cd ... || exit 1` fires, a binary that is absent or lost its execute bit,
+# ETXTBSY mid-deploy -- was respawned every loop, forever, with no cap and no
+# delay. That is a tight fork loop writing two log lines a second (and, before
+# the rotation above, into a log that never shrank).
+#
+# Five immediate exits in a row and it stops, loudly, once. Anything that runs
+# longer than RESPAWN_MIN_RUN clears the streak, so a legitimate Reset Pak or
+# cart-quit -- which is a deliberate exit after a real session -- never counts
+# toward it. Switching cores clears it too.
+RESPAWN_FAILS=0
+RESPAWN_HALTED=0
+SPAWN_TIME=0
+RESPAWN_MAX=5
+RESPAWN_MIN_RUN=5
+
 while true; do
     CUR=$(cat /tmp/CORENAME 2>/dev/null)
     # Also track the loaded RBF path (MiSTer Main's argv[1]) — sister-core
@@ -189,10 +213,15 @@ while true; do
 
         # Spawn the handler for the new core, if it's a hybrid core
         HANDLER="$GAMES_ROOT/$CUR/_handler.sh"
+        # A core change is a fresh start: clear any halted respawn streak, so a
+        # core that was failing is retried once the user comes back to it.
+        RESPAWN_FAILS=0
+        RESPAWN_HALTED=0
         if [ -n "$CUR" ] && [ -x "$HANDLER" ]; then
             log "Spawning handler for '$CUR' (RBF=$CUR_RBF)"
             "$HANDLER" &
             CHILD=$!
+            SPAWN_TIME=$(date +%s)
         fi
         LAST="$CUR"
         LAST_RBF="$CUR_RBF"
@@ -206,10 +235,32 @@ while true; do
         EXIT_CODE=$?
         log "'$LAST' handler exited code $EXIT_CODE"
         CHILD=""
+
+        # Did it actually run, or did it fall over on startup? A real session
+        # (Reset Pak, cart quit) lasts far longer than RESPAWN_MIN_RUN, so this
+        # only counts handlers that are failing to start at all.
+        NOW=$(date +%s)
+        if [ "$SPAWN_TIME" -gt 0 ] && [ $(( NOW - SPAWN_TIME )) -lt "$RESPAWN_MIN_RUN" ]; then
+            RESPAWN_FAILS=$(( RESPAWN_FAILS + 1 ))
+        else
+            RESPAWN_FAILS=0
+        fi
+
         if [ "$CUR" = "$LAST" ] && [ -x "$GAMES_ROOT/$LAST/_handler.sh" ]; then
-            log "Respawning handler for '$LAST'"
-            "$GAMES_ROOT/$LAST/_handler.sh" &
-            CHILD=$!
+            if [ "$RESPAWN_FAILS" -ge "$RESPAWN_MAX" ]; then
+                # Once, not every second: the whole point is to stop the noise.
+                if [ "$RESPAWN_HALTED" != "1" ]; then
+                    log "'$LAST' handler exited within ${RESPAWN_MIN_RUN}s, ${RESPAWN_FAILS}x in a row -- NOT respawning."
+                    log "Check the binary exists and is executable, and that $GAMES_ROOT/$LAST is present."
+                    log "Switching cores clears this."
+                    RESPAWN_HALTED=1
+                fi
+            else
+                log "Respawning handler for '$LAST'"
+                "$GAMES_ROOT/$LAST/_handler.sh" &
+                CHILD=$!
+                SPAWN_TIME=$(date +%s)
+            fi
         fi
     fi
 
