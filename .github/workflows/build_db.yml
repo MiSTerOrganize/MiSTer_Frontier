@@ -13,7 +13,12 @@ on:
     # core binary rebuild until something else triggers a push to main.
     - cron: '17 4 * * *'
 
-permissions: write-all
+# Scoped, not write-all. This job fetches and executes a remote script
+# (curl … build_db.py | python3 -), so the token it runs with is worth keeping
+# to what it actually uses: pushing db.json to the db branch. The per-core repos
+# already scope theirs the same way.
+permissions:
+  contents: write
 
 jobs:
   build_db:
