@@ -325,8 +325,9 @@ if [ "$PURGE_USER_CONTENT" = "yes" ]; then
         # and a top-level tree rather than something under games/, which is why
         # the two rm -rf's above did not reach it. Left behind, purge removed
         # every other trace of the core -- including the content library -- and
-        # told the user so, while the takes, .snapshots, .scratch and .armsnap
-        # all survived.
+        # told the user so, while the takes, .scratch and .armsnap all
+        # survived. (There is no .snapshots any more; the rm -rf covers the
+        # whole tree either way, which is why this is the durable form.)
         rm -rf /media/fat/replays/"$core_name"    2>/dev/null
         rm -rf /media/fat/replays/"$core_name"_*  2>/dev/null
 
