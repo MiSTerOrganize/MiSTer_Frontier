@@ -119,42 +119,54 @@ jobs:
         # Give raw.githubusercontent a moment to serve the new commit.
         sleep 10
 
-    # CDN PROPAGATION GATE. build_db.py FETCHES the raw.githubusercontent
-    # URLs in external_files.csv, and this repo OWNS three of the fourteen
-    # manifest files -- so a push touching them triggers this workflow and
-    # races their propagation, exactly as the per-core dispatch paths do.
+    # CDN PROPAGATION GATE (pre-build).
     #
-    # Measured 2026-08-24 on the per-core side: commit-back 23:26:19Z, rebuild
-    # 23:26:22Z; one file had propagated and another had not, and db.json
-    # shipped a stale hash. update_all then rejects the mismatched file and
-    # DELETES it (the 2026-05-26 failure).
+    # build_db.py FETCHES the raw.githubusercontent URLs in external_files.csv.
+    # The CDN is edge-cached, so a build started moments after a push can read
+    # the PREVIOUS bytes for a file that push just replaced, and db.json then
+    # ships a stale hash. update_all rejects the mismatched file and DELETES it
+    # -- a broken core on every user's card until the daily cron. Measured
+    # 2026-08-24: a commit-back at 23:26:19Z, a rebuild at 23:26:22Z, and a
+    # stale bios hash published.
     #
-    # A refusal here is FATAL, unlike at a dispatch site: skipping a dispatch
-    # means someone publishes later, but building anyway means publishing
-    # db.json from stale bytes. Failing leaves the previous, self-consistent
-    # db.json in place and the daily cron retries.
+    # The per-core repos gate their DISPATCH on propagation, which stops the
+    # pointless rebuild, but that runs on the producer's runner and raw.github
+    # is cached per-POP -- it cannot prove what THIS runner will read. This can,
+    # because it runs here, moments before the real fetch, against the same
+    # edge. "What git has" is the API contents endpoint, never the CDN.
     #
-    # This also subsumes what the `sleep 10` above was guessing at, for the
-    # CSV as well as the shipped files.
-    - name: Gate - CDN serves this repo's shipped files
+    # Fatal on refusal: skipping a dispatch means someone publishes later, but
+    # building anyway means publishing db.json from stale bytes, which is the
+    # harm itself. The previous db.json stays in place and the cron retries.
+    - name: Gate - the CDN serves what git has, for every manifest URL
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        CDN_RC=0
-        bash .github/scripts/cdn_ready.sh \
-          external_files.csv \
-          MiSTer_Frontier/Master_Daemon.sh \
-          Scripts/Install_MiSTer_Frontier.sh \
-          Scripts/Uninstall_MiSTer_Frontier.sh || CDN_RC=$?
-        if [ "$CDN_RC" = "2" ]; then
-          echo "::error::cdn_ready.sh usage error (rc=2) -- a CI bug in the call, not propagation. Refusing to build."
-          exit 1
-        fi
-        if [ "$CDN_RC" != "0" ]; then
-          echo "::error::raw.githubusercontent has not served this commit's files after ~2.5 min. NOT building: build_db.py fetches those URLs, so db.json would record stale hashes and update_all would DELETE the mismatched file. The previous db.json stays in place; the daily cron will retry."
-          exit 1
-        fi
+        # build_db.py leaves the checkout on the ORPHAN db branch, which holds
+        # only db.json.zip -- so stash the CSV the build is about to use, for
+        # the post-build check to read.
+        cp external_files.csv "$RUNNER_TEMP/external_files.csv"
+        python3 .github/scripts/verify_db_currency.py --pre
 
     - name: Build Custom Database for MiSTer Downloader
       run: set -o pipefail && curl --fail --location https://raw.githubusercontent.com/theypsilon/Downloader_DB-Template_MiSTer/main/.github/build_db.py | python3 -
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         FINDER_IGNORE: source assets MiSTer_Frontier Scripts games docs
+
+    # CDN PROPAGATION GATE (post-build) -- verify the DELIVERABLE.
+    #
+    # The pre-build check verifies the INPUTS. This verifies the OUTPUT that
+    # users actually receive, so it also catches what the pre-build check
+    # cannot: a push landing mid-build, or the builder mis-transcribing a hash.
+    # It reads the published db.json.zip off the db branch and compares every
+    # entry against git, and it fails on an entry with no CSV row (content that
+    # would ship unverified) or a CSV row absent from db.json (a file users
+    # would silently stop receiving).
+    #
+    # Fatal: a red build demands attention. The pre-build check passed, so a
+    # failure here is not ordinary propagation lag.
+    - name: Gate - the published db.json matches git
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: python3 .github/scripts/verify_db_currency.py --post --csv "$RUNNER_TEMP/external_files.csv"
