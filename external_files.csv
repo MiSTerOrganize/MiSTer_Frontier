@@ -4,7 +4,7 @@ Scripts/Install_MiSTer_Frontier.sh,https://raw.githubusercontent.com/MiSTerOrgan
 Scripts/Uninstall_MiSTer_Frontier.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_Frontier/main/Scripts/Uninstall_MiSTer_Frontier.sh,,,pico-8 openbor-4086 openbor-7533
 games/OpenBOR/_handler.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_OpenBOR_7533/main/games/OpenBOR/_handler.sh,,,openbor-4086 openbor-7533
 docs/OpenBOR/README.md,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_OpenBOR_7533/main/docs/OpenBOR/README.md,,,openbor-4086 openbor-7533
-_Other/PICO-8_20260813.rbf,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/_Other/PICO-8_20260813.rbf,,,pico-8
+_Other/PICO-8_20260825.rbf,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/_Other/PICO-8_20260825.rbf,,,pico-8
 games/PICO-8/PICO-8,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/games/PICO-8/PICO-8,,,pico-8
 games/PICO-8/bios.p8,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/games/PICO-8/bios.p8,,,pico-8
 games/PICO-8/_handler.sh,https://raw.githubusercontent.com/MiSTerOrganize/MiSTer_PICO-8/main/games/PICO-8/_handler.sh,,,pico-8
