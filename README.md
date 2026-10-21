@@ -43,6 +43,10 @@ existing setup.
 When new Frontier cores are released, just run `update_all` again. New
 cores show up and work the same way, no reinstall needed.
 
+To remove MiSTer Frontier, run `Scripts/Uninstall_MiSTer_Frontier.sh`
+from the Scripts menu, then delete the `[MiSTerOrganize/MiSTer_Frontier]`
+section from `downloader.ini` so `update_all` stops reinstalling it.
+
 ## How it works
 
 When you load a Frontier core from MiSTer's menu, the FPGA loads the
@@ -64,7 +68,7 @@ choose specific cores. Three tags are available:
 | Tag | What it includes |
 |---|---|
 | `pico-8` | PICO-8 fantasy console (RBF + emulator + BIOS + handler + docs) |
-| `openbor-4086` | OpenBOR engine Build 4086 (legacy PAK collections) |
+| `openbor-4086` | OpenBOR engine Build 4086 (legacy PAK collections; archived, no further updates) |
 | `openbor-7533` | OpenBOR engine 4.0 Build 7533 (modern PAK collections) |
 
 **Examples:**
@@ -95,7 +99,7 @@ no 4086), prefer a positive filter (`filter = openbor-7533`) over a
 negative one. Use negative filters only for clean exclusions where you
 don't need the rest of that core family.
 
-The bootstrap files (Master_Daemon, Install script) install with every
+The bootstrap files (Master_Daemon, Install and Uninstall scripts) install with every
 filter selection automatically — you can't accidentally exclude them.
 
 **Inspecting the database:** the live manifest (every file, hash, size,
@@ -118,13 +122,14 @@ per-core repositories:
 | Repo | Contents |
 |---|---|
 | [MiSTer_PICO-8](https://github.com/MiSTerOrganize/MiSTer_PICO-8) | PICO-8 source, FPGA, ARM emulator, RBF, BIOS, docs |
-| [MiSTer_OpenBOR_4086](https://github.com/MiSTerOrganize/MiSTer_OpenBOR_4086) | OpenBOR Build 4086 source, FPGA, ARM build, RBF, docs |
+| [MiSTer_OpenBOR_4086](https://github.com/MiSTerOrganize/MiSTer_OpenBOR_4086) | OpenBOR Build 4086 source, FPGA, ARM build, RBF, docs (archived; still installed, no further updates) |
 | [MiSTer_OpenBOR_7533](https://github.com/MiSTerOrganize/MiSTer_OpenBOR_7533) | OpenBOR Build 7533 source, FPGA, ARM build, RBF, docs |
-| MiSTer_Frontier (this repo) | Combiner — `external_files.csv`, Master_Daemon, Install script, DB build workflow |
+| MiSTer_Frontier (this repo) | Combiner — `external_files.csv`, Master_Daemon, Install and Uninstall scripts, DB build workflow |
 
 Source isn't downloaded to your MiSTer; it's on GitHub for reading,
 auditing, and contribution. Open issues / PRs against the relevant
-per-core repo. Each per-core repo is self-contained — you can clone any
+per-core repo (OpenBOR 4086 is archived, so OpenBOR issues go to the
+7533 repo). Each per-core repo is self-contained — you can clone any
 one of them and build the core independently.
 
 ## License
