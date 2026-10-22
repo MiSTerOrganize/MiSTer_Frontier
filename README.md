@@ -1,5 +1,7 @@
 # MiSTer Frontier
 
+[![Sponsor](https://img.shields.io/github/sponsors/MiSTerOrganize?label=Sponsor&logo=GitHub)](https://github.com/sponsors/MiSTerOrganize)
+
 MiSTer Frontier is a project that brings software-based gaming platforms —
 fantasy consoles, game engines, and retro graphics systems — to MiSTer
 FPGA as hybrid FPGA+ARM cores with native video and audio output.
