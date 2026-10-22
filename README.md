@@ -1,6 +1,6 @@
 # MiSTer Frontier
 
-[![Sponsor](https://img.shields.io/github/sponsors/MiSTerOrganize?label=Sponsor&logo=GitHub)](https://github.com/sponsors/MiSTerOrganize)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=GitHub)](https://github.com/sponsors/MiSTerOrganize)
 
 MiSTer Frontier is a project that brings software-based gaming platforms —
 fantasy consoles, game engines, and retro graphics systems — to MiSTer
