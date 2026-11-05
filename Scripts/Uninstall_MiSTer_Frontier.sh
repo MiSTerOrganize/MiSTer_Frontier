@@ -83,12 +83,11 @@ if [ -t 0 ]; then
     echo "Two uninstall modes:"
     echo
     echo "  [S] Safe (recommended) -- removes cores + system files only."
-    echo "      KEEPS your saves, savestates, configs, high scores, PAKs, carts, music."
+    echo "      KEEPS your saves, savestates, configs, high scores, PAKs, carts."
     echo "      Reinstall later -> everything still works."
     echo
     echo "  [P] Purge -- also removes user content (saves, savestates, configs,"
-    echo "      Paks/, Carts/, the Music Player's music folders, and"
-    echo "      equivalent per-core user dirs)."
+    echo "      Paks/, Carts/, and equivalent per-core user dirs)."
     echo "      Use this only if you want zero trace of the cores."
     echo
     echo "  [Q] Quit without changes."
@@ -101,7 +100,7 @@ if [ -t 0 ]; then
         [Pp])
             PURGE_USER_CONTENT="yes"
             echo "Purge mode selected. Confirm again:"
-            read -n 1 -r -p "This will delete saves + PAKs + carts + music. Type Y to confirm: " confirm
+            read -n 1 -r -p "This will delete saves + PAKs + carts. Type Y to confirm: " confirm
             echo
             if [ "$confirm" != "Y" ] && [ "$confirm" != "y" ]; then
                 echo "Cancelled."
@@ -184,7 +183,6 @@ for f in "$STARTUP" "$STARTUP_UNDERSCORE"; do
     sed -i '/pico8_daemon\.sh/d'              "$f"
     sed -i '/openbor_4086_daemon\.sh/d'       "$f"
     sed -i '/openbor_7533_daemon\.sh/d'       "$f"
-    sed -i '/music_player_daemon\.sh/d'       "$f"
     sed -i '/PICO-8 auto-launch daemon/d'     "$f"
     sed -i '/OpenBOR auto-launch daemon/d'    "$f"
     echo "     OK Cleaned $f"
@@ -274,32 +272,6 @@ for core_name in "${DISCOVERED_CORES[@]}"; do
     rm -f "/tmp/${_mk}_"* 2>/dev/null
 
     echo "     OK Cleaned core: $core_name"
-done
-
-# ─── 4b) Music Player extras ───
-# The Music Player is one MiSTer Frontier core spread over 43 folders: the shared
-# games/Music_Player/ (binary, launcher, BIOS files) and one folder per system
-# (games/NES_NSF/ ...), each holding a one-line _handler.sh and the user's songs.
-# The loop above already removed every handler, the binary and docs/Music_Player/.
-# What it cannot see: the files shipped beside the binary (not named after the
-# folder), and the RBFs, which live in _Multimedia/_Music/, not _Other/.
-# Removed by NAME only -- the system folders keep the user's music in safe mode.
-MP_DIR="/media/fat/games/Music_Player"
-MP_RBF="/media/fat/_Multimedia/_Music"
-for core_name in "${DISCOVERED_CORES[@]}"; do
-    [ "$core_name" = "Music_Player" ] || continue
-    for f in hebios.bin hebios_LICENSE.txt cvos7.bin cvos7_LICENSE.txt THIRD_PARTY_NOTICES.txt; do
-        rm -f "$MP_DIR/$f" 2>/dev/null
-    done
-    rmdir "$MP_DIR" 2>/dev/null
-    for sub in _Console _Computer _Arcade; do
-        rm -f "$MP_RBF/$sub/"*_Music_Player_*.rbf 2>/dev/null
-        rmdir "$MP_RBF/$sub" 2>/dev/null
-    done
-    rmdir "$MP_RBF" "/media/fat/_Multimedia" 2>/dev/null   # only if now empty
-    # Earlier Music Player releases shipped their own installer.
-    rm -f /media/fat/Scripts/Install_Music_Player.sh 2>/dev/null
-    echo "     OK Cleaned Music Player files (RBFs in $MP_RBF, BIOS files)"
 done
 
 # ─── 5) Also clean sister-cored engines' shared dirs ───

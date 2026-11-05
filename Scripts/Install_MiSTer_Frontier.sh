@@ -15,8 +15,7 @@
 #
 #   1. chmod +x on the master daemon
 #   2. Strip any obsolete per-core daemon registrations from earlier
-#      MiSTer Frontier installs (pico8_daemon.sh, openbor_*_daemon.sh,
-#      music_player_daemon.sh)
+#      MiSTer Frontier installs (pico8_daemon.sh, openbor_*_daemon.sh)
 #   3. Register Master_Daemon in /media/fat/linux/user-startup.sh so it
 #      auto-starts at every boot
 #   4. Start Master_Daemon now so the user doesn't have to reboot
@@ -114,7 +113,6 @@ fi
 sed -i '/pico8_daemon\.sh/d'              "$ACTIVE_STARTUP"
 sed -i '/openbor_4086_daemon\.sh/d'       "$ACTIVE_STARTUP"
 sed -i '/openbor_7533_daemon\.sh/d'       "$ACTIVE_STARTUP"
-sed -i '/music_player_daemon\.sh/d'       "$ACTIVE_STARTUP"
 sed -i '/PICO-8 auto-launch daemon/d'     "$ACTIVE_STARTUP"
 sed -i '/OpenBOR auto-launch daemon/d'    "$ACTIVE_STARTUP"
 echo "  OK Cleared obsolete per-core daemon registrations"
@@ -133,7 +131,6 @@ fi
 killall pico8_daemon.sh        2>/dev/null
 killall openbor_4086_daemon.sh 2>/dev/null
 killall openbor_7533_daemon.sh 2>/dev/null
-killall music_player_daemon.sh 2>/dev/null
 
 # 4b) Migrate from pre-unification OpenBOR layout (May 2026):
 # Both OpenBOR builds now share games/OpenBOR/ folder. Move user PAKs
